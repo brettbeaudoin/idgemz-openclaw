@@ -1,0 +1,25 @@
+{
+  "dashboard": {
+    "title": "IDGemz Sales Dashboard",
+    "panels": [
+      {
+        "title": "Today's Revenue",
+        "targets": [{
+          "rawSql": "SELECT SUM(order_total) as revenue FROM orders WHERE order_date::date = CURRENT_DATE"
+        }]
+      },
+      {
+        "title": "Orders by Day",
+        "targets": [{
+          "rawSql": "SELECT DATE(order_date) as day, COUNT(*) as orders FROM orders WHERE order_date > NOW() - INTERVAL '30 days' GROUP BY 1 ORDER BY 1"
+        }]
+      },
+      {
+        "title": "Top Products",
+        "targets": [{
+          "rawSql": "SELECT p.title, SUM(oi.quantity) as units FROM order_items oi JOIN channel_listings cl ON oi.channel_listing_id = cl.id JOIN products p ON cl.product_id = p.id GROUP BY 1 ORDER BY 2 DESC LIMIT 10"
+        }]
+      }
+    ]
+  }
+}

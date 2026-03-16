@@ -1,0 +1,25 @@
+{
+  "name": "idgemz-sync",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "shopify:oauth": "node shopify-oauth-server.js",
+    "shopify:sync": "node sync-shopify.js",
+    "shopify:bootstrap": "node sync-shopify.js --bootstrap",
+    "shopify:daily": "node sync-shopify.js --yesterday-et",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "amazon-sp-api": "^1.2.0",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "luxon": "^3.7.2",
+    "node-fetch": "^2.7.0",
+    "pg": "^8.17.2"
+  }
+}
