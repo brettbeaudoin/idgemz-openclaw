@@ -183,18 +183,34 @@ async function main() {
 
       // For Etsy email imports, keep a single canonical order_item row per order.
       // The cron re-sees forwarded emails, so blind inserts would duplicate quantity forever.
-      await pool.query(
-        `DELETE FROM public.order_items
+      // Preserve any manually-set channel_listing_id (Etsy emails don't include SKU).
+      const existingItem = await pool.query(
+        `SELECT id, channel_listing_id FROM public.order_items
          WHERE order_id = $1
-           AND COALESCE(raw->>'source','') = 'etsy_email'`,
+           AND COALESCE(raw->>'source','') = 'etsy_email'
+         LIMIT 1`,
         [orderId]
       );
 
-      await pool.query(
-        `INSERT INTO public.order_items (order_id, channel_listing_id, quantity, unit_price, tax, raw, created_at)
-         VALUES ($1, $2, 1, $3, $4, $5::jsonb, now())`,
-        [orderId, listingId, parsed.revenue, parsed.tax, JSON.stringify(itemRaw)]
-      );
+      const effectiveListingId = listingId || existingItem.rows[0]?.channel_listing_id || null;
+
+      if (existingItem.rows.length) {
+        // Update in place instead of delete+insert to preserve channel_listing_id
+        await pool.query(
+          `UPDATE public.order_items
+           SET channel_listing_id = COALESCE($2, channel_listing_id),
+               quantity = 1, unit_price = $3, tax = $4,
+               raw = $5::jsonb
+           WHERE id = $1`,
+          [existingItem.rows[0].id, effectiveListingId, parsed.revenue, parsed.tax, JSON.stringify(itemRaw)]
+        );
+      } else {
+        await pool.query(
+          `INSERT INTO public.order_items (order_id, channel_listing_id, quantity, unit_price, tax, raw, created_at)
+           VALUES ($1, $2, 1, $3, $4, $5::jsonb, now())`,
+          [orderId, effectiveListingId, parsed.revenue, parsed.tax, JSON.stringify(itemRaw)]
+        );
+      }
 
       if (exists) updated++; else imported++;
     }
