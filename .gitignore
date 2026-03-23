@@ -1,0 +1,51 @@
+# Dependencies
+node_modules/
+
+# Environment & secrets
+.env
+.env.local
+.env.production
+.env.*.local
+
+# Tokens & credentials
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+*token*.json
+*credential*.json
+*secret*.json
+
+# QBO encrypted token store (if any)
+qbo-token.enc
+qbo-tokens/
+
+# Sync state files (runtime, not code)
+.amazon-sheet-sync-state.json
+.amazon_orders_sync_state.json
+.amazon_sheet_sync_state.json
+.cron-amazon-orders-sync-state.json
+
+# Data files (reports, imports, cached)
+data/
+/tmp/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Vercel build output
+vercel/.vercel/
+qbo-vercel-callback/.vercel/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

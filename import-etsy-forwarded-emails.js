@@ -100,7 +100,7 @@ async function main() {
     if (!chRes.rows.length) throw new Error('No Etsy channel found');
     const etsyChannelId = chRes.rows[0].id;
 
-    const query = `in:inbox from:brett@nerdwidgets.com subject:("You made a sale on Etsy") newer_than:${LOOKBACK}`;
+    const query = `in:inbox subject:("You made a sale on Etsy") newer_than:${LOOKBACK}`;
     const messages = gogSearch(query, 50);
 
     let imported = 0;

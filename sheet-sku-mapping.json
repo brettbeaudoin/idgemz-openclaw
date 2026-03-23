@@ -45,15 +45,53 @@
 
     "Shopify": {
       "BHT0CF-YUBI": "BHT0CF-YUBI",
+      "BHT0DF": "BH-T0-DF",
+      "BHT1DF": "BH-T1-DF",
+      "BHT1FLAG-V2": "BH-T1 RSA Flag V2",
+      "BHT1STE-GO6": "BH-T1 G06",
+      "BHT1STE-GO7": "BH-T1 G07",
       "BHT1STE-YUBI-V2": "BH-T1 Yubi V2",
+      "BHT2DF": "BH-T2-DF",
+      "BHT2FLAG-V2": "BH-T2 RSA Flag V2",
+      "BHT2STE-ET": "BH-T2 EToken",
+      "BHT2STE-GO7": "BH-T2 GO7",
+      "BHT2STE-RSA-ET": "BH-T2 RSA & ET",
+      "BHT2STE-RSA-GO6": "BH-T2 RSA & G06",
+      "BHT2STE-RSA-GO7": "BH-T2 RSA & G07",
+      "BHT2STE-RSA-YUBI-V1": "BH-T2 RSA & Yubi V1",
       "BHT2STE-RSA-YUBI-V2": "BH-T2 RSA & Yubi V2",
       "BHT2STE-V2": "BH-T2 RSA Stealth V2",
-      "BHT3STE-V2": "BH-T3 RSA Stealth V2",
-      "BHT3STE-RSA-YUBI-V1": "BH-T3 RSA & Yubi V1"
+      "BHT2STE-YUBI-GO7-V1": "BH-T2 Yubi & G07 V1",
+      "BHT2STE-YUBI-GO7-V2": "BH-T2 Yubi & G07 V2",
+      "BHT3DF": "BH-T3-DF",
+      "BHT3STE-RSA-YUBI-V1": "BH-T3 RSA & Yubi V1",
+      "BHT3STE-V2": "BH-T3 RSA Stealth V2"
     },
 
     "Etsy": {
-      "BHT0CF-YUBI": "BHT0CF-YUBI"
+      "BHT0-CF": "BH-T0-CF",
+      "BHT0CF-YUBI": "BHT0CF-YUBI",
+      "BHT0DF": "BH-T0-DF",
+      "BHT1DF": "BH-T1-DF",
+      "BHT1FLAG-V2": "BH-T1 RSA Flag V2",
+      "BHT1STE-ET": "BH-T1 EToken",
+      "BHT1STE-GO6": "BH-T1 G06",
+      "BHT1STE-GO7": "BH-T1 G07",
+      "BHT1STE-YUBI-V1": "BH-T1 Yubi V1 Slot",
+      "BHT2DF": "BH-T2-DF",
+      "BHT2STE-ET": "BH-T2 EToken",
+      "BHT2STE-GO7": "BH-T2 GO7",
+      "BHT2STE-RSA-ET": "BH-T2 RSA & ET",
+      "BHT2STE-RSA-GO6": "BH-T2 RSA & G06",
+      "BHT2STE-RSA-GO7": "BH-T2 RSA & G07",
+      "BHT2STE-RSA-YUBI": "BH-T2 RSA & Yubi V1",
+      "BHT2STE-YUBI-GO7-V1": "BH-T2 Yubi & G07 V1",
+      "BHT2STE-YUBI-GO7-V2": "BH-T2 Yubi & G07 V2",
+      "BHT2STE-YUBI-V1": "BH-T2 Yubi V1",
+      "BHT3DF": "BH-T3-DF",
+      "BHT3FLAG-V2": "BH-T3 RSA Flag V2",
+      "BHT3STE-RSA-YUBI": "BH-T3 RSA & Yubi V1",
+      "BHT3STE-V2": "BH-T3 RSA Stealth V2"
     }
   },
   "skuPrices": {
