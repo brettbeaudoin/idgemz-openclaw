@@ -191,10 +191,11 @@ async function buildRowsForPtDate({ pool, header, headerIndex, datePt, channel }
             END AS effective_unit_price,
             CASE
               WHEN $3 = 'amazon' THEN (oi.raw->>'SellerSKU')
-              ELSE (oi.raw->>'sku')
+              ELSE COALESCE(cl.channel_sku, oi.raw->>'sku')
             END AS item_sku
      FROM public.orders o
      JOIN public.order_items oi ON oi.order_id=o.id
+     LEFT JOIN public.channel_listings cl ON cl.id=oi.channel_listing_id
      LEFT JOIN public.shopify_orders so ON so.order_id=o.id
      -- Amazon fallback pricing: if this order_item has no unit_price yet,
      -- use the most recent known unit_price for the same SellerSKU from historical Amazon orders.
