@@ -93,40 +93,44 @@ function round2(n) {
   return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 }
 
-function loadSheetSkuConfig() {
+// Load channel SKU → google_sheet_sku mapping from the database.
+// Supports: amazon_sku, shopify_sku, etsy_sku, walmart_sku → google_sheet_sku
+async function loadChannelSkuMap(pool, channelIdType) {
+  const res = await pool.query(
+    `WITH ch AS (
+       SELECT product_id, id_value AS channel_sku
+       FROM public.product_identifiers
+       WHERE id_type = $1 AND active = true
+     ), sheet AS (
+       SELECT product_id, id_value AS google_sheet_sku
+       FROM public.product_identifiers
+       WHERE id_type = 'google_sheet_sku' AND active = true
+     )
+     SELECT ch.channel_sku, sheet.google_sheet_sku
+     FROM ch
+     JOIN sheet ON sheet.product_id = ch.product_id`,
+    [channelIdType]
+  );
+  const m = new Map();
+  for (const r of res.rows) m.set(String(r.channel_sku), String(r.google_sheet_sku));
+  return m;
+}
+
+// Deprecated: JSON file overrides. Kept as fallback during migration.
+function loadSkuMappingOverrides(channel) {
   try {
     const p = require('path').resolve(__dirname, 'sheet-sku-mapping.json');
     if (!fs.existsSync(p)) return {};
-    return JSON.parse(fs.readFileSync(p, 'utf8'));
+    const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+    return j?.channels?.[channel] || {};
   } catch (e) {
-    console.warn('Warning: failed to load sheet-sku-mapping.json:', e?.message || e);
     return {};
   }
 }
 
-function loadSkuMappingOverrides(channel) {
-  const j = loadSheetSkuConfig();
-  return j?.channels?.[channel] || {};
-}
-
+// Legacy alias — now delegates to loadChannelSkuMap
 async function loadAmazonSkuToSheetHeader(pool) {
-  const res = await pool.query(
-    `WITH amazon AS (
-       SELECT product_id, id_value AS amazon_sku
-       FROM public.product_identifiers
-       WHERE id_type='amazon_sku' AND active=true
-     ), sheet AS (
-       SELECT product_id, id_value AS google_sheet_sku
-       FROM public.product_identifiers
-       WHERE id_type='google_sheet_sku' AND active=true
-     )
-     SELECT a.amazon_sku, s.google_sheet_sku
-     FROM amazon a
-     JOIN sheet s ON s.product_id=a.product_id`
-  );
-  const m = new Map();
-  for (const r of res.rows) m.set(String(r.amazon_sku), String(r.google_sheet_sku));
-  return m;
+  return loadChannelSkuMap(pool, 'amazon_sku');
 }
 
 async function resolveChannelIds(pool) {
@@ -449,15 +453,19 @@ async function main() {
       `SELECT id FROM public.channels WHERE platform='walmart' ORDER BY name LIMIT 1`
     )).rows?.[0]?.id;
 
-    // Load Amazon SKU mapping from Postgres. (Other channels use direct SKU→header matching or JSON overrides.)
-    const amazonSkuMap = await loadAmazonSkuToSheetHeader(pool);
+    // Load per-channel SKU→sheet-header maps from Postgres product_identifiers.
+    const [amazonSkuMap, shopifySkuMap, etsySkuMap, walmartSkuMap] = await Promise.all([
+      loadChannelSkuMap(pool, 'amazon_sku'),
+      loadChannelSkuMap(pool, 'shopify_sku'),
+      loadChannelSkuMap(pool, 'etsy_sku'),
+      loadChannelSkuMap(pool, 'amazon_sku'), // Walmart SKUs currently match Amazon SKUs
+    ]);
 
     const channels = [
       { platform: 'amazon', id: amazonChannelId, label: 'Amazon', skuMap: amazonSkuMap },
-      { platform: 'shopify', id: shopifyChannelId, label: 'Shopify', skuMap: new Map() },
-      // Etsy + Walmart SKUs match our internal/Amazon SKU scheme, so reuse the Amazon SKU→sheet-header map.
-      { platform: 'etsy', id: etsyChannelId, label: 'Etsy', skuMap: amazonSkuMap },
-      { platform: 'walmart', id: walmartChannelId, label: 'Walmart', skuMap: amazonSkuMap }
+      { platform: 'shopify', id: shopifyChannelId, label: 'Shopify', skuMap: shopifySkuMap },
+      { platform: 'etsy', id: etsyChannelId, label: 'Etsy', skuMap: etsySkuMap },
+      { platform: 'walmart', id: walmartChannelId, label: 'Walmart', skuMap: walmartSkuMap }
     ].filter((c) => c.id);
 
     // Sheet is tracked in PT day
