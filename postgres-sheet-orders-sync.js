@@ -243,11 +243,12 @@ async function buildRowsForPtDate({ pool, header, headerIndex, datePt, channel }
       // We want net item revenue: (price - discounts) per unit.
       try {
         const raw = r.item_raw;
-        const price = raw?.price != null ? Number(raw.price) : unitPrice;
+        // Shopify raw.price is PER-UNIT; discount_allocations.amount is TOTAL discount for the line.
+        const pricePerUnit = raw?.price != null ? Number(raw.price) : unitPrice;
         const allocs = Array.isArray(raw?.discount_allocations) ? raw.discount_allocations : [];
-        const discount = allocs.reduce((sum, a) => sum + Number(a?.amount || 0), 0);
-        const net = (Number.isFinite(price) ? price : 0) - (Number.isFinite(discount) ? discount : 0);
-        unitPrice = qty ? net / qty : net;
+        const totalDiscount = allocs.reduce((sum, a) => sum + Number(a?.amount || 0), 0);
+        const discountPerUnit = qty ? totalDiscount / qty : totalDiscount;
+        unitPrice = (Number.isFinite(pricePerUnit) ? pricePerUnit : 0) - (Number.isFinite(discountPerUnit) ? discountPerUnit : 0);
       } catch (_) {
         // ignore and fall back
       }
