@@ -289,7 +289,9 @@ async function buildRowsForPtDate({ pool, header, headerIndex, datePt, channel }
 
     const totalRounded = round2(o.total);
     if (channel.platform === 'amazon' && !(totalRounded > 0)) {
-      throw new Error(`Missing order total for ${channelLabel} order ${o.orderId} on ${dateSheet}. This likely means unit_price is missing and no fallback price was found.`);
+      // Pending orders often have no price yet — write $0.00 instead of crashing.
+      // The next sync will update when Amazon releases the price.
+      console.warn(`Warning: ${channelLabel} order ${o.orderId} has no price (likely Pending). Writing $0.00.`);
     }
     const totalStr = Number.isFinite(totalRounded) ? totalRounded.toFixed(2) : '';
     row[headerIndex['Total']] = totalStr;
