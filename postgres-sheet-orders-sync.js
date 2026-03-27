@@ -18,48 +18,66 @@
 
 require('dotenv').config();
 
+const { SellingPartner } = require('amazon-sp-api');
 const { Pool } = require('pg');
 const { DateTime } = require('luxon');
-const { execFileSync } = require('child_process');
 const fs = require('fs');
+const { google } = require('googleapis');
 
 const SHEET_ID = process.env.SHEET_ID || '1HoedZLqY6iq3hIKJLq2-qIAEiKuyoQdWflu7bozWpKg';
 const SHEET_NAME = 'Orders';
-const GOG_ACCOUNT = process.env.GOG_ACCOUNT || 'dangerboatai@gmail.com';
+const GOOGLE_SERVICE_ACCOUNT_KEY = process.env.GOOGLE_SERVICE_ACCOUNT_KEY || '/Users/bbeaudoin/dangerboat-10a6ea1ca753.json';
 
 const AMAZON_CHANNEL_ID = process.env.AMAZON_CHANNEL_ID || '248fdd46-cdff-4296-9598-51777a060859';
 const SHOPIFY_CHANNEL_ID = process.env.SHOPIFY_CHANNEL_ID || null; // optional override
 
-function gogSheetsGet(rangeA1) {
-  const out = execFileSync('gog', ['sheets', 'get', SHEET_ID, rangeA1, '--account', GOG_ACCOUNT, '--json', '--no-input'], {
-    encoding: 'utf8',
-    maxBuffer: 50 * 1024 * 1024,
-    timeout: 120000
-  });
-  const j = JSON.parse(out);
-  return j.values || [];
+let sheetsClientPromise = null;
+
+async function getSheetsClient() {
+  if (!sheetsClientPromise) {
+    sheetsClientPromise = (async () => {
+      if (!fs.existsSync(GOOGLE_SERVICE_ACCOUNT_KEY)) {
+        throw new Error(`Google service account key not found: ${GOOGLE_SERVICE_ACCOUNT_KEY}`);
+      }
+      const auth = new google.auth.GoogleAuth({
+        keyFile: GOOGLE_SERVICE_ACCOUNT_KEY,
+        scopes: [
+          'https://www.googleapis.com/auth/spreadsheets',
+          'https://www.googleapis.com/auth/drive'
+        ]
+      });
+      const client = await auth.getClient();
+      return google.sheets({ version: 'v4', auth: client });
+    })();
+  }
+  return sheetsClientPromise;
 }
 
-function gogSheetsUpdate(rangeA1, values2d) {
-  execFileSync('gog', [
-    'sheets', 'update', SHEET_ID, rangeA1,
-    '--account', GOG_ACCOUNT,
-    '--values-json', JSON.stringify(values2d),
-    '--input', 'USER_ENTERED',
-    '--no-input'
-  ], {
-    stdio: 'inherit',
-    timeout: 120000
+async function gogSheetsGet(rangeA1) {
+  const sheets = await getSheetsClient();
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: rangeA1
+  });
+  return res.data.values || [];
+}
+
+async function gogSheetsUpdate(rangeA1, values2d) {
+  const sheets = await getSheetsClient();
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SHEET_ID,
+    range: rangeA1,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: { values: values2d }
   });
 }
 
-function gogSheetsMetadata() {
-  const out = execFileSync('gog', ['sheets', 'metadata', SHEET_ID, '--account', GOG_ACCOUNT, '--json', '--no-input'], {
-    encoding: 'utf8',
-    maxBuffer: 50 * 1024 * 1024,
-    timeout: 120000
+async function gogSheetsMetadata() {
+  const sheets = await getSheetsClient();
+  const res = await sheets.spreadsheets.get({
+    spreadsheetId: SHEET_ID
   });
-  return JSON.parse(out);
+  return res.data;
 }
 
 function numToCol(n) {
@@ -73,8 +91,8 @@ function numToCol(n) {
   return s;
 }
 
-function getSheetColumnCount(sheetTitle) {
-  const md = gogSheetsMetadata();
+async function getSheetColumnCount(sheetTitle) {
+  const md = await gogSheetsMetadata();
   const sheet = (md.sheets || []).find((s) => s?.properties?.title === sheetTitle);
   const colCount = sheet?.properties?.gridProperties?.columnCount;
   if (!colCount) throw new Error(`Could not determine columnCount for sheet tab: ${sheetTitle}`);
@@ -126,6 +144,87 @@ function loadSkuMappingOverrides(channel) {
   } catch (e) {
     return {};
   }
+}
+
+let amazonSpClientPromise = null;
+
+async function getAmazonSpClient(pool) {
+  if (!amazonSpClientPromise) {
+    amazonSpClientPromise = (async () => {
+      const result = await pool.query(`
+        SELECT api_credentials
+        FROM channels
+        WHERE platform = 'amazon' AND api_connected = true
+        LIMIT 1
+      `);
+      if (!result.rows.length) throw new Error('Amazon channel not connected');
+      const { refreshToken } = result.rows[0].api_credentials;
+      return new SellingPartner({
+        region: 'na',
+        refresh_token: refreshToken,
+        credentials: {
+          SELLING_PARTNER_APP_CLIENT_ID: process.env.SELLING_PARTNER_APP_CLIENT_ID,
+          SELLING_PARTNER_APP_CLIENT_SECRET: process.env.SELLING_PARTNER_APP_CLIENT_SECRET
+        },
+        options: {
+          auto_request_throttled: true
+        }
+      });
+    })();
+  }
+  return amazonSpClientPromise;
+}
+
+async function fetchAmazonListingPrices(pool, items) {
+  const out = new Map();
+  if (!items?.length) return out;
+
+  const sp = await getAmazonSpClient(pool);
+  for (const item of items) {
+    const sku = String(item?.sku || '').trim();
+    const asin = String(item?.asin || '').trim();
+    if (!sku && !asin) continue;
+
+    try {
+      let res = null;
+      if (sku) {
+        res = await sp.callAPI({
+          endpoint: 'productPricing',
+          operation: 'getListingOffers',
+          path: { SellerSKU: sku },
+          query: {
+            MarketplaceId: 'ATVPDKIKX0DER',
+            ItemCondition: 'New'
+          },
+          options: { version: 'v0' }
+        });
+      } else if (asin) {
+        res = await sp.callAPI({
+          endpoint: 'productPricing',
+          operation: 'getItemOffers',
+          path: { Asin: asin },
+          query: {
+            MarketplaceId: 'ATVPDKIKX0DER',
+            ItemCondition: 'New'
+          },
+          options: { version: 'v0' }
+        });
+      }
+
+      const listingPrice =
+        res?.Offers?.find((o) => o?.MyOffer)?.ListingPrice?.Amount ??
+        res?.Summary?.BuyBoxPrices?.[0]?.ListingPrice?.Amount ??
+        res?.Summary?.LowestPrices?.[0]?.ListingPrice?.Amount ??
+        null;
+
+      const n = Number(listingPrice);
+      if (Number.isFinite(n) && n > 0) out.set(`${sku}|${asin}`, n);
+    } catch (e) {
+      console.warn(`Warning: failed to fetch live Amazon price for ${sku || asin}: ${e?.message || e}`);
+    }
+  }
+
+  return out;
 }
 
 // Legacy alias — now delegates to loadChannelSkuMap
@@ -216,6 +315,26 @@ async function buildRowsForPtDate({ pool, header, headerIndex, datePt, channel }
     [channelId, datePt, channel.platform]
   );
 
+  const liveAmazonPriceInputs = [];
+  if (channel.platform === 'amazon') {
+    const seen = new Set();
+    for (const r of res.rows) {
+      const currentPrice = r.effective_unit_price == null ? null : Number(r.effective_unit_price);
+      const sku = String(r.item_sku || '').trim();
+      const asin = String(r.item_raw?.ASIN || '').trim();
+      if (!Number.isFinite(currentPrice) && (sku || asin)) {
+        const key = `${sku}|${asin}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          liveAmazonPriceInputs.push({ sku, asin });
+        }
+      }
+    }
+  }
+  const liveAmazonPrices = channel.platform === 'amazon'
+    ? await fetchAmazonListingPrices(pool, liveAmazonPriceInputs)
+    : new Map();
+
   // Aggregate per order
   const byOrder = new Map();
   for (const r of res.rows) {
@@ -238,6 +357,16 @@ async function buildRowsForPtDate({ pool, header, headerIndex, datePt, channel }
     const qty = Number(r.quantity || 0);
 
     let unitPrice = r.effective_unit_price == null ? null : Number(r.effective_unit_price);
+    const sku = String(r.item_sku || '').trim();
+    const asin = String(r.item_raw?.ASIN || '').trim();
+
+    if (channel.platform === 'amazon' && !Number.isFinite(unitPrice)) {
+      const fallback = liveAmazonPrices.get(`${sku}|${asin}`);
+      if (Number.isFinite(fallback) && fallback > 0) {
+        unitPrice = fallback;
+      }
+    }
+
     if (channel.platform === 'shopify' && r.item_raw) {
       // Apply Shopify discount allocations at the line-item level.
       // We want net item revenue: (price - discounts) per unit.
@@ -262,7 +391,6 @@ async function buildRowsForPtDate({ pool, header, headerIndex, datePt, channel }
       o.total += qty * unitPrice;
     }
 
-    const sku = String(r.item_sku || '').trim();
     if (sku) {
       // Amazon: skuMap maps SellerSKU -> sheet header.
       // Shopify: we try direct header match by SKU.
@@ -289,9 +417,7 @@ async function buildRowsForPtDate({ pool, header, headerIndex, datePt, channel }
 
     const totalRounded = round2(o.total);
     if (channel.platform === 'amazon' && !(totalRounded > 0)) {
-      // Pending orders often have no price yet — write $0.00 instead of crashing.
-      // The next sync will update when Amazon releases the price.
-      console.warn(`Warning: ${channelLabel} order ${o.orderId} has no price (likely Pending). Writing $0.00.`);
+      console.warn(`Warning: ${channelLabel} order ${o.orderId} still has no price after live pricing fallback.`);
     }
     const totalStr = Number.isFinite(totalRounded) ? totalRounded.toFixed(2) : '';
     row[headerIndex['Total']] = totalStr;
@@ -333,7 +459,7 @@ function findLastNonEmptyRow(vals, cols = 4) {
 }
 
 async function rebuildDateBlock({ pool, header, headerIndex, datePt, channel }) {
-  const colCount = getSheetColumnCount(SHEET_NAME);
+  const colCount = await getSheetColumnCount(SHEET_NAME);
   const lastCol = numToCol(colCount);
 
   const { dateSheet, rows, orderIdColName, channelLabel } = await buildRowsForPtDate({ pool, header, headerIndex, datePt, channel });
@@ -342,13 +468,13 @@ async function rebuildDateBlock({ pool, header, headerIndex, datePt, channel }) 
   // We'll locate existing rows and either overwrite with empty or skip if none.
 
   // Find last non-empty row
-  const vals = gogSheetsGet(`${SHEET_NAME}!A1:D20000`);
+  const vals = await gogSheetsGet(`${SHEET_NAME}!A1:D20000`);
   const lastNonEmpty = findLastNonEmptyRow(vals, 4);
   if (!lastNonEmpty) throw new Error('Could not find last non-empty row in Orders');
 
   // Scan tail window to find existing block for date+Amazon
   const tailStart = Math.max(17, lastNonEmpty - 8000);
-  const existingRows = gogSheetsGet(`${SHEET_NAME}!A${tailStart}:${lastCol}${lastNonEmpty}`);
+  const existingRows = await gogSheetsGet(`${SHEET_NAME}!A${tailStart}:${lastCol}${lastNonEmpty}`);
 
   const dateIdx = headerIndex['Date'];
   const chanIdx = headerIndex['Sales Channel'];
@@ -390,7 +516,7 @@ async function rebuildDateBlock({ pool, header, headerIndex, datePt, channel }) 
   const existingNotesByOrderId = new Map();
   if (existingCount > 0 && notesIdx != null && orderIdIdx != null) {
     const endExisting = startRow + existingCount - 1;
-    const existingBlock = gogSheetsGet(`${SHEET_NAME}!A${startRow}:${lastCol}${endExisting}`);
+    const existingBlock = await gogSheetsGet(`${SHEET_NAME}!A${startRow}:${lastCol}${endExisting}`);
     for (const r of existingBlock) {
       const oid = String(r?.[orderIdIdx] ?? '').trim();
       const note = String(r?.[notesIdx] ?? '').trim();
@@ -427,7 +553,7 @@ async function rebuildDateBlock({ pool, header, headerIndex, datePt, channel }) 
   }
 
   const range = `${SHEET_NAME}!A${startRow}:${lastCol}${endRow}`;
-  gogSheetsUpdate(range, values);
+  await gogSheetsUpdate(range, values);
 
   console.log(`Rebuilt ${channelLabel} Orders block for ${dateSheet}: wrote ${targetCount} rows into ${range} (${existingCount ? `overwrote ${existingCount}` : 'appended'}).`);
 }
@@ -436,11 +562,11 @@ async function main() {
   const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://localhost/idgemz' });
 
   try {
-    const colCount = getSheetColumnCount(SHEET_NAME);
+    const colCount = await getSheetColumnCount(SHEET_NAME);
     const lastCol = numToCol(colCount);
 
     // Header row at 16
-    const header = gogSheetsGet(`${SHEET_NAME}!A16:${lastCol}16`)[0];
+    const header = (await gogSheetsGet(`${SHEET_NAME}!A16:${lastCol}16`))[0];
     if (!header || header.length < 10) throw new Error('Could not read Orders header row');
 
     const headerIndex = {};
