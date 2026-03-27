@@ -87,17 +87,22 @@ class AmazonSync {
     const syncLogId = syncLog.rows[0].id;
     
     try {
-      const orders = await this.sellingPartner.callAPI({
-        endpoint: 'orders',
-        operation: 'getOrders',
-        query
-      });
-      
       let processedCount = 0;
+      let nextToken = null;
+      let page = 0;
       
-      for (const order of orders.Orders || []) {
-        // Insert or update order
-        const orderTotalKnown = !!(order.OrderTotal && order.OrderTotal.Amount != null);
+      do {
+        const requestQuery = nextToken ? { NextToken: nextToken } : query;
+        const orders = await this.sellingPartner.callAPI({
+          endpoint: 'orders',
+          operation: 'getOrders',
+          query: requestQuery
+        });
+        page += 1;
+        
+        for (const order of orders.Orders || []) {
+          // Insert or update order
+          const orderTotalKnown = !!(order.OrderTotal && order.OrderTotal.Amount != null);
 
         const shippingAddress = order.ShippingAddress || {};
         const buyerName = order.BuyerInfo?.BuyerName || null;
@@ -273,7 +278,10 @@ class AmazonSync {
         }
         
         processedCount++;
-      }
+        }
+
+        nextToken = orders.NextToken || null;
+      } while (nextToken);
       
       // Update sync log
       await pool.query(`
