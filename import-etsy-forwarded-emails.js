@@ -30,38 +30,42 @@ function money(body, label) {
   return null;
 }
 
-function extractOrder(body, subject) {
+function extractOrder(body, subject, messageDate) {
   const orderMatch = body.match(/order number is:\s*(\d+)/i) || subject.match(/Order\s*#(\d+)/i);
   if (!orderMatch) return null;
   const orderNumber = orderMatch[1];
 
-  const shipBy = subject.match(/Ship by ([A-Za-z]{3}) (\d{1,2})/i);
-  const orderedDate = new Date();
-  if (shipBy) {
-    // Etsy seller emails are “ship by” ~2 days after order; not reliable as order date.
-    // We keep today's date when importing from email-only unless already known elsewhere.
+  let orderedDate = null;
+  const orderedOn = body.match(/Ordered on:?\s*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}(?:\s+at\s+\d{1,2}:\d{2}\s*(?:AM|PM))?)/i)
+    || body.match(/Order date:?\s*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}(?:\s+at\s+\d{1,2}:\d{2}\s*(?:AM|PM))?)/i);
+  if (orderedOn) {
+    const parsed = new Date(orderedOn[1]);
+    if (!Number.isNaN(parsed.getTime())) orderedDate = parsed;
   }
-
-  const bodySnippetStart = body.indexOf('Transaction ID:');
-  const pre = bodySnippetStart >= 0 ? body.slice(Math.max(0, bodySnippetStart - 900), bodySnippetStart) : body;
+  if (!orderedDate && messageDate) {
+    const parsedMsgDate = new Date(messageDate.replace(' ', 'T'));
+    if (!Number.isNaN(parsedMsgDate.getTime())) orderedDate = parsedMsgDate;
+  }
 
   let sku = null;
   let tokenConfig = null;
-  const tc = pre.match(/Token Configuration:\s*([^\n]+)/i);
+  const tc = body.match(/Token Configuration:\s*([^\n]+)/i);
   if (tc) tokenConfig = tc[1].trim();
-  const titleMatch = pre.match(/\n([^\n]+Badge Holder[^\n]+)\n/i);
-  const title = titleMatch ? titleMatch[1].trim() : null;
+  const itemMatch = body.match(/Item:\s*([^\n]+)/i);
+  const title = itemMatch ? itemMatch[1].trim() : null;
 
   // Heuristics for current Etsy catalog emails.
-  if (/Yubikey 5 NFC & RSA SecurID Tokens/i.test(pre)) {
-    if (/1 RSA\s*&\s*1 Yubikey V2/i.test(pre)) sku = 'BHT2STE-RSA-YUBI-V2';
-    else if (/2 RSA\s*&\s*1 Yubikey/i.test(pre)) sku = 'BHT3STE-RSA-YUBI';
-  } else if (/Flag Badge Holder/i.test(pre)) {
-    if (/Holds 2 Tokens/i.test(pre)) sku = 'BHT2FLAG-V2';
-  } else if (/Stealth Badge Holder/i.test(pre)) {
-    if (/Holds 1 Token/i.test(pre)) sku = 'BHT1STE-V2';
-    else if (/Holds 2 Tokens/i.test(pre)) sku = 'BHT2STE-V2';
-    else if (/Holds 3 Tokens/i.test(pre)) sku = 'BHT3STE-V2';
+  if (/Yubikey 5 NFC & RSA SecurID Tokens/i.test(body)) {
+    if (/1 RSA\s*&\s*1 Yubikey V2/i.test(body)) sku = 'BHT2STE-RSA-YUBI-V2';
+    else if (/2 RSA\s*&\s*1 Yubikey/i.test(body)) sku = 'BHT3STE-RSA-YUBI';
+  } else if (/Flag Badge Holder/i.test(body)) {
+    if (/Holds 1 Token/i.test(body)) sku = 'BHT1FLAG-V2';
+    else if (/Holds 2 Tokens/i.test(body)) sku = 'BHT2FLAG-V2';
+    else if (/Holds 3 Tokens/i.test(body)) sku = 'BHT3FLAG-V2';
+  } else if (/Stealth Badge Holder/i.test(body)) {
+    if (/Holds 1 Token/i.test(body)) sku = 'BHT1STE-V2';
+    else if (/Holds 2 Tokens/i.test(body)) sku = 'BHT2STE-V2';
+    else if (/Holds 3 Tokens/i.test(body)) sku = 'BHT3STE-V2';
   }
 
   const ship = body.match(/Shipping address \*\s*\n([^\n]+)\n([^\n]+)\n([A-Z .'-]+),\s*([A-Z]{2})\s*(\d{5}(?:-\d{4})?)/i);
@@ -77,6 +81,7 @@ function extractOrder(body, subject) {
 
   return {
     orderNumber,
+    orderedDate,
     sku,
     title,
     tokenConfig,
@@ -110,7 +115,7 @@ async function main() {
     for (const msg of messages) {
       const body = msg.body || '';
       const subject = msg.subject || '';
-      const parsed = extractOrder(body, subject);
+      const parsed = extractOrder(body, subject, msg.date);
       if (!parsed) {
         skipped++;
         continue;
@@ -145,14 +150,15 @@ async function main() {
            channel_id, channel_order_id, order_date, customer_name, shipping_address,
            order_total, currency, status, fulfillment_channel, created_at, updated_at, amount_known
          ) VALUES (
-           $1::uuid, $2::text, NOW(), $3::text,
+           $1::uuid, $2::text, COALESCE($3::timestamptz, NOW()), $4::text,
            jsonb_strip_nulls(jsonb_build_object(
-             'name',$3::text,'address1',$4::text,'city',$5::text,'state',$6::text,'postal_code',$7::text,'country','US'
+             'name',$4::text,'address1',$5::text,'city',$6::text,'state',$7::text,'postal_code',$8::text,'country','US'
            )),
-           $8::numeric, 'USD', 'manual_import', 'etsy', now(), now(), true
+           $9::numeric, 'USD', 'manual_import', 'etsy', now(), now(), true
          )
          ON CONFLICT (channel_id, channel_order_id)
          DO UPDATE SET
+           order_date = COALESCE(EXCLUDED.order_date, public.orders.order_date),
            customer_name = COALESCE(EXCLUDED.customer_name, public.orders.customer_name),
            shipping_address = COALESCE(EXCLUDED.shipping_address, public.orders.shipping_address),
            order_total = EXCLUDED.order_total,
@@ -162,6 +168,7 @@ async function main() {
         [
           etsyChannelId,
           parsed.orderNumber,
+          parsed.orderedDate ? parsed.orderedDate.toISOString() : null,
           parsed.customerName,
           parsed.address1,
           parsed.city,
