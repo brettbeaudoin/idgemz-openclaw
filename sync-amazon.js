@@ -13,6 +13,23 @@ function num(x) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function deriveAmazonPerUnitPrice(item) {
+  const qtyOrdered = num(item?.QuantityOrdered);
+  const qtyShipped = num(item?.QuantityShipped);
+  const lineItemPrice = item?.ItemPrice?.Amount != null ? Number(item.ItemPrice.Amount) : null;
+  if (!Number.isFinite(lineItemPrice)) return null;
+
+  // Amazon sometimes returns ItemPrice for the shipped subset while QuantityOrdered still reflects
+  // the full ordered quantity (common on pending bulk orders / quantity-price rows).
+  // Prefer shipped quantity when it produces a sane per-unit value; otherwise fall back to ordered qty.
+  if (qtyShipped > 0 && qtyOrdered > qtyShipped) {
+    return lineItemPrice / qtyShipped;
+  }
+  if (qtyOrdered > 0) return lineItemPrice / qtyOrdered;
+  if (qtyShipped > 0) return lineItemPrice / qtyShipped;
+  return lineItemPrice;
+}
+
 class AmazonSync {
   constructor() {
     this.sellingPartner = null;
@@ -229,9 +246,7 @@ class AmazonSync {
           const itemTax = (item.ItemTax && item.ItemTax.Amount != null) ? parseFloat(item.ItemTax.Amount) : null;
           const promoDiscount = (item.PromotionDiscount && item.PromotionDiscount.Amount != null) ? parseFloat(item.PromotionDiscount.Amount) : null;
 
-          const perUnitPrice = (lineItemPrice == null)
-            ? null
-            : (qtyOrdered > 0 ? (lineItemPrice / qtyOrdered) : null);
+          const perUnitPrice = deriveAmazonPerUnitPrice(item);
 
           // Insert/update order item (idempotent by (order_id, channel_line_item_id))
           await pool.query(`
@@ -340,9 +355,7 @@ class AmazonSync {
       orderItem.ASIN,
       orderItem.Title,
       // Store per-unit price for the listing when we have it.
-      (orderItem.ItemPrice?.Amount != null)
-        ? (parseFloat(orderItem.ItemPrice.Amount) / (orderItem.QuantityOrdered || 1))
-        : null
+      deriveAmazonPerUnitPrice(orderItem)
     ]);
     
     return listing.rows[0];

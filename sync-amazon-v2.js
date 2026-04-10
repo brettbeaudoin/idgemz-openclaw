@@ -193,11 +193,16 @@ async function syncAmazon() {
             item.SellerSKU,
             item.ASIN,
             item.Title,
-            parseFloat(item.ItemPrice?.Amount || 0) / (item.QuantityOrdered || 1)
+            (item.ItemPrice?.Amount == null)
+              ? null
+              : (((item.QuantityShipped || 0) > 0 && (item.QuantityOrdered || 0) > (item.QuantityShipped || 0))
+                  ? (parseFloat(item.ItemPrice.Amount) / (item.QuantityShipped || 1))
+                  : (parseFloat(item.ItemPrice.Amount) / (item.QuantityOrdered || 1)))
           ]);
           
           const qty = item.QuantityOrdered || 1;
-          const itemPrice = parseFloat(item.ItemPrice?.Amount || 0);
+          const qtyShipped = item.QuantityShipped || 0;
+          const itemPrice = item.ItemPrice?.Amount != null ? parseFloat(item.ItemPrice.Amount) : null;
           const shipPrice = parseFloat(item.ShippingPrice?.Amount || 0);
           const itemTax = parseFloat(item.ItemTax?.Amount || 0);
           const promoDiscount = parseFloat(item.PromotionDiscount?.Amount || 0);
@@ -213,7 +218,11 @@ async function syncAmazon() {
             order.id,
             listing.rows[0].id,
             qty,
-            qty ? (itemPrice / qty) : itemPrice,
+            (itemPrice == null)
+              ? null
+              : ((qtyShipped > 0 && qty > qtyShipped)
+                  ? (itemPrice / qtyShipped)
+                  : (qty ? (itemPrice / qty) : itemPrice)),
             shipPrice,
             itemTax,
             promoDiscount,

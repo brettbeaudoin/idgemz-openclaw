@@ -1,8 +1,7 @@
 // Postgres → Google Sheet sync for Orders (all channels we have in Postgres).
 //
 // Rebuilds the NerdWidgets Google Sheet Orders tab for:
-// - today PT
-// - yesterday PT
+// - the last 7 PT days by default
 //
 // Source of truth: Postgres (orders + order_items).
 //
@@ -599,14 +598,15 @@ async function main() {
     ].filter((c) => c.id);
 
     // Sheet is tracked in PT day
-    const todayPt = DateTime.now().setZone('America/Los_Angeles').toISODate();
-    const yesterdayPt = DateTime.now().setZone('America/Los_Angeles').minus({ days: 1 }).toISODate();
+    const nowPt = DateTime.now().setZone('America/Los_Angeles');
 
     const dates = [];
     if (process.env.DATE_PT) {
       dates.push(process.env.DATE_PT);
     } else {
-      dates.push(yesterdayPt, todayPt);
+      for (let daysAgo = 6; daysAgo >= 0; daysAgo--) {
+        dates.push(nowPt.minus({ days: daysAgo }).toISODate());
+      }
     }
 
     for (const d of dates) {
