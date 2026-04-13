@@ -71,6 +71,31 @@ async function gogSheetsUpdate(rangeA1, values2d) {
   });
 }
 
+async function gogInsertRows(sheetTitle, startRow1Based, rowCount) {
+  if (!rowCount || rowCount < 1) return;
+  const sheets = await getSheetsClient();
+  const md = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
+  const sheet = (md.data.sheets || []).find((s) => s?.properties?.title === sheetTitle);
+  const sheetId = sheet?.properties?.sheetId;
+  if (sheetId == null) throw new Error(`Could not determine sheetId for tab: ${sheetTitle}`);
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SHEET_ID,
+    requestBody: {
+      requests: [{
+        insertDimension: {
+          range: {
+            sheetId,
+            dimension: 'ROWS',
+            startIndex: startRow1Based - 1,
+            endIndex: startRow1Based - 1 + rowCount
+          },
+          inheritFromBefore: true
+        }
+      }]
+    }
+  });
+}
+
 async function gogSheetsMetadata() {
   const sheets = await getSheetsClient();
   const res = await sheets.spreadsheets.get({
@@ -457,23 +482,21 @@ function findLastNonEmptyRow(vals, cols = 4) {
   return lastNonEmpty;
 }
 
-async function rebuildDateBlock({ pool, header, headerIndex, datePt, channel }) {
-  const colCount = await getSheetColumnCount(SHEET_NAME);
-  const lastCol = numToCol(colCount);
+async function rebuildDateBlock({ pool, header, headerIndex, datePt, channel, sheetState }) {
+  const { colCount, lastCol, vals } = sheetState;
 
   const { dateSheet, rows, orderIdColName, channelLabel } = await buildRowsForPtDate({ pool, header, headerIndex, datePt, channel });
 
   // If no rows for that day, we still may want to clear existing block.
   // We'll locate existing rows and either overwrite with empty or skip if none.
 
-  // Find last non-empty row
-  const vals = await gogSheetsGet(`${SHEET_NAME}!A1:D20000`);
+  // Find last non-empty row from the in-memory snapshot.
   const lastNonEmpty = findLastNonEmptyRow(vals, 4);
   if (!lastNonEmpty) throw new Error('Could not find last non-empty row in Orders');
 
-  // Scan tail window to find existing block for date+Amazon
+  // Scan tail window to find existing block for date+channel from the in-memory snapshot.
   const tailStart = Math.max(17, lastNonEmpty - 8000);
-  const existingRows = await gogSheetsGet(`${SHEET_NAME}!A${tailStart}:${lastCol}${lastNonEmpty}`);
+  const existingRows = vals.slice(tailStart - 1, lastNonEmpty);
 
   const dateIdx = headerIndex['Date'];
   const chanIdx = headerIndex['Sales Channel'];
@@ -500,6 +523,18 @@ async function rebuildDateBlock({ pool, header, headerIndex, datePt, channel }) 
   }
 
   const targetCount = rows.length;
+  const growth = Math.max(0, targetCount - existingCount);
+
+  if (growth > 0 && existingCount > 0) {
+    const oldEndExisting = startRow + existingCount - 1;
+    const overlapRows = vals.slice(oldEndExisting, oldEndExisting + growth);
+    const wouldOverwriteLiveRows = overlapRows.some((r) => (r || []).slice(0, 4).some((x) => String(x ?? '').trim()));
+    if (wouldOverwriteLiveRows) {
+      await gogInsertRows(SHEET_NAME, oldEndExisting + 1, growth);
+      vals.splice(oldEndExisting, 0, ...Array.from({ length: growth }, () => Array(header.length).fill('')));
+    }
+  }
+
   const writeCount = Math.max(existingCount, targetCount);
   if (writeCount === 0) {
     console.log(`No existing ${channelLabel} rows for ${dateSheet} and no Postgres rows; nothing to do.`);
@@ -515,7 +550,7 @@ async function rebuildDateBlock({ pool, header, headerIndex, datePt, channel }) 
   const existingNotesByOrderId = new Map();
   if (existingCount > 0 && notesIdx != null && orderIdIdx != null) {
     const endExisting = startRow + existingCount - 1;
-    const existingBlock = await gogSheetsGet(`${SHEET_NAME}!A${startRow}:${lastCol}${endExisting}`);
+    const existingBlock = vals.slice(startRow - 1, startRow - 1 + existingCount);
     for (const r of existingBlock) {
       const oid = String(r?.[orderIdIdx] ?? '').trim();
       const note = String(r?.[notesIdx] ?? '').trim();
@@ -554,6 +589,11 @@ async function rebuildDateBlock({ pool, header, headerIndex, datePt, channel }) 
   const range = `${SHEET_NAME}!A${startRow}:${lastCol}${endRow}`;
   await gogSheetsUpdate(range, values);
 
+  // Keep the in-memory snapshot fresh so later date blocks don't trigger extra reads.
+  for (let i = 0; i < values.length; i++) {
+    vals[startRow - 1 + i] = values[i];
+  }
+
   console.log(`Rebuilt ${channelLabel} Orders block for ${dateSheet}: wrote ${targetCount} rows into ${range} (${existingCount ? `overwrote ${existingCount}` : 'appended'}).`);
 }
 
@@ -563,9 +603,10 @@ async function main() {
   try {
     const colCount = await getSheetColumnCount(SHEET_NAME);
     const lastCol = numToCol(colCount);
+    const vals = await gogSheetsGet(`${SHEET_NAME}!A1:${lastCol}20000`);
 
     // Header row at 16
-    const header = (await gogSheetsGet(`${SHEET_NAME}!A16:${lastCol}16`))[0];
+    const header = vals[15];
     if (!header || header.length < 10) throw new Error('Could not read Orders header row');
 
     const headerIndex = {};
@@ -611,7 +652,7 @@ async function main() {
 
     for (const d of dates) {
       for (const ch of channels) {
-        await rebuildDateBlock({ pool, header, headerIndex, datePt: d, channel: ch });
+        await rebuildDateBlock({ pool, header, headerIndex, datePt: d, channel: ch, sheetState: { colCount, lastCol, vals } });
       }
     }
   } finally {
