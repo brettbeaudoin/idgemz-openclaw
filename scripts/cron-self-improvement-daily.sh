@@ -4,19 +4,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOG_DIR="$REPO_DIR/logs"
-LOCK_DIR="/tmp/openclaw-self-improvement-weekly.lock"
+LOCK_DIR="/tmp/openclaw-self-improvement-daily.lock"
 
 source "$SCRIPT_DIR/cron-env.sh"
 
 mkdir -p "$LOG_DIR"
-exec >> "$LOG_DIR/self-improvement-weekly.log" 2>&1
+exec >> "$LOG_DIR/self-improvement-daily.log" 2>&1
 
 timestamp() {
   date +%Y-%m-%dT%H:%M:%S%z
 }
 
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  echo "$(timestamp) self-improvement weekly: previous run still active; skipping"
+  echo "$(timestamp) self-improvement daily: previous run still active; skipping"
   exit 0
 fi
 
@@ -25,7 +25,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "$(timestamp) self-improvement weekly: start"
+echo "$(timestamp) self-improvement daily: start"
 cd "$REPO_DIR"
-node "$REPO_DIR/scripts/self-improvement-weekly.js" --mode=weekly
-echo "$(timestamp) self-improvement weekly: done"
+node "$REPO_DIR/scripts/self-improvement-weekly.js" --mode=daily
+echo "$(timestamp) self-improvement daily: done"

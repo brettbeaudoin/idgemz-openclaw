@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.openclaw.self-improvement-daily</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/bbeaudoin/clawd/idgemz-openclaw/scripts/cron-self-improvement-daily.sh</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>9</integer>
+    <key>Minute</key>
+    <integer>17</integer>
+  </dict>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>WorkingDirectory</key>
+  <string>/Users/bbeaudoin/clawd/idgemz-openclaw</string>
+  <key>StandardOutPath</key>
+  <string>/Users/bbeaudoin/clawd/idgemz-openclaw/logs/launchd-self-improvement-daily.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/bbeaudoin/clawd/idgemz-openclaw/logs/launchd-self-improvement-daily.err.log</string>
+</dict>
+</plist>

@@ -12,6 +12,8 @@ const LOG_DIR = path.join(REPO_DIR, 'logs');
 const TELEGRAM_CHANNEL = process.env.SELF_IMPROVEMENT_TELEGRAM_CHANNEL || 'telegram';
 const TELEGRAM_TARGET = process.env.SELF_IMPROVEMENT_TELEGRAM_TARGET || '8130524019';
 const DRY_RUN = ['1', 'true', 'yes', 'on'].includes(String(process.env.SELF_IMPROVEMENT_DRY_RUN || '').toLowerCase());
+const NOTIFY_ALWAYS = ['1', 'true', 'yes', 'on'].includes(String(process.env.SELF_IMPROVEMENT_NOTIFY_ALWAYS || '').toLowerCase());
+const MODE = parseMode();
 
 const changes = [];
 const ok = [];
@@ -20,6 +22,15 @@ const needsAttention = [];
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function parseMode() {
+  const modeArg = process.argv.find((arg) => arg.startsWith('--mode='));
+  const mode = (modeArg ? modeArg.split('=')[1] : process.env.SELF_IMPROVEMENT_MODE || 'weekly').toLowerCase();
+  if (!['daily', 'weekly'].includes(mode)) {
+    throw new Error(`Unknown self-improvement mode "${mode}" (expected daily or weekly)`);
+  }
+  return mode;
 }
 
 function localDate() {
@@ -89,7 +100,7 @@ function appendDailyNote(summaryLines) {
   const notePath = path.join(memoryDir, `${localDate()}.md`);
   const body = [
     '',
-    `## ${localDate()} Weekly Self-Improvement Maintenance`,
+    `## ${localDate()} ${MODE === 'weekly' ? 'Weekly' : 'Daily'} Self-Improvement Maintenance`,
     `- Ran at ${nowIso()} from \`${path.relative(CLAWD_DIR, __filename)}\`.`,
     ...summaryLines.map((line) => `- ${line}`)
   ].join('\n');
@@ -161,6 +172,55 @@ function checkMemoryStack() {
   }
 }
 
+function checkMemoryStackHealthOnly() {
+  addResult(
+    run('docker compose config', 'docker', ['compose', '--env-file', '.env', 'config', '--quiet'], { cwd: STACK_DIR }),
+    'Docker Compose memory-stack config is valid',
+    'Docker Compose config check failed'
+  );
+  addResult(
+    run('hindsight health', 'curl', ['-fsS', 'http://localhost:8888/health'], { timeout: 30000 }),
+    'Hindsight health endpoint is reachable',
+    'Hindsight health check failed'
+  );
+  addResult(
+    run('milvus health', 'curl', ['-fsS', 'http://localhost:9091/healthz'], { timeout: 30000 }),
+    'Milvus health endpoint is reachable',
+    'Milvus health check failed'
+  );
+  addResult(
+    run('memory dry-run', 'npm', ['run', 'dry-run'], { cwd: STACK_DIR, timeout: 180000 }),
+    'Canonical memory files scan cleanly',
+    'Memory dry-run failed'
+  );
+
+  const outbox = run('memory outbox check', 'docker', [
+    'compose', '--env-file', '.env', 'exec', '-T',
+    'memory-postgres',
+    'psql', '-U', 'openclaw_memory', '-d', 'openclaw_memory',
+    '-At',
+    '-c',
+    [
+      "select coalesce(sum(case when status = 'failed' then 1 else 0 end),0) from memory_outbox;",
+      "select coalesce(sum(case when status = 'pending' and updated_at < now() - interval '2 hours' then 1 else 0 end),0) from memory_outbox;"
+    ].join(' ')
+  ], { cwd: STACK_DIR, timeout: 60000 });
+  if (!outbox.ok) {
+    needsAttention.push(`Memory outbox check failed: ${summarizeOutput(outbox)}`);
+    return;
+  }
+  const [failed, stalePending] = outbox.stdout.split(/\r?\n/).map((value) => Number(value.trim()));
+  if ((failed || 0) > 0) {
+    needsAttention.push(`Memory outbox has ${failed} failed row(s)`);
+  }
+  if ((stalePending || 0) > 0) {
+    needsAttention.push(`Memory outbox has ${stalePending} pending row(s) older than 2 hours`);
+  }
+  if ((failed || 0) === 0 && (stalePending || 0) === 0) {
+    ok.push('Memory outbox has no failed or stale pending rows');
+  }
+}
+
 function checkRecallPlugin() {
   addResult(
     run('plugin tests', 'npm', ['test'], { cwd: PLUGIN_DIR, timeout: 180000 }),
@@ -188,7 +248,8 @@ function checkRuntimeBasics() {
 }
 
 function buildMessage() {
-  const lines = ['Weekly DB self-improvement report', `Time: ${nowIso()}`, ''];
+  const title = MODE === 'weekly' ? 'Weekly DB self-improvement report' : 'Daily DB self-improvement check';
+  const lines = [title, `Time: ${nowIso()}`, ''];
   const changed = changes.length ? changes : ['No source/code changes were needed; safe maintenance checks ran.'];
   lines.push('Changed:');
   changed.slice(0, 8).forEach((item) => lines.push(`- ${item}`));
@@ -210,13 +271,21 @@ function buildMessage() {
 function main() {
   fs.mkdirSync(LOG_DIR, { recursive: true });
   checkRuntimeBasics();
-  checkMemoryStack();
-  checkRecallPlugin();
+  if (MODE === 'weekly') {
+    checkMemoryStack();
+    checkRecallPlugin();
+  } else {
+    checkMemoryStackHealthOnly();
+  }
   maybePushCleanAheadBranch();
 
-  needsPermission.push('Skipped LLM-backed self-review/code edits because that can spend API money; approve a one-off review when you want that lane run.');
+  if (MODE === 'weekly') {
+    needsPermission.push('Skipped LLM-backed self-review/code edits because that can spend API money; approve a one-off review when you want that lane run.');
+  }
 
-  if (!DRY_RUN) {
+  const shouldReport = MODE === 'weekly' || NOTIFY_ALWAYS || needsAttention.length > 0 || changes.length > 0;
+
+  if (!DRY_RUN && shouldReport) {
     appendDailyNote([
       ...changes.map((item) => `Changed: ${item}`),
       ...ok.slice(0, 8).map((item) => `Verified: ${item}`),
@@ -228,15 +297,18 @@ function main() {
   const message = buildMessage();
   if (DRY_RUN) {
     console.log(message);
-  } else {
+  } else if (shouldReport) {
     sendTelegram(message);
+  } else {
+    console.log(`${nowIso()} ${MODE} self-improvement check clean; no Telegram sent.`);
   }
 }
 
 try {
   main();
 } catch (error) {
-  const text = `Weekly DB self-improvement report\nTime: ${nowIso()}\n\nNeeds attention:\n- Self-improvement runner crashed: ${error?.stack || error}`;
+  const title = MODE === 'weekly' ? 'Weekly DB self-improvement report' : 'Daily DB self-improvement check';
+  const text = `${title}\nTime: ${nowIso()}\n\nNeeds attention:\n- Self-improvement runner crashed: ${error?.stack || error}`;
   try {
     sendTelegram(text);
   } catch (sendError) {
