@@ -9,6 +9,7 @@
 // and warehouse_location='home'.
 
 require('dotenv').config();
+require('./gog-env');
 
 const { Pool } = require('pg');
 const { execFileSync } = require('child_process');

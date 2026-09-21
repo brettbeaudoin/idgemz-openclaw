@@ -302,13 +302,10 @@ async function main() {
 
           // channel_listings
           const qtyOrdered = item.QuantityOrdered || 0;
-          const qtyShipped = item.QuantityShipped || 0;
           const itemTotal = item.ItemPrice?.Amount != null ? parseFloat(item.ItemPrice.Amount) : null;
           const unitPrice = (itemTotal == null)
             ? null
-            : ((qtyShipped > 0 && qtyOrdered > qtyShipped)
-                ? (itemTotal / qtyShipped)
-                : (qtyOrdered ? itemTotal / qtyOrdered : itemTotal));
+            : (qtyOrdered ? itemTotal / qtyOrdered : itemTotal);
 
           const listing = await pool.query(
             `INSERT INTO channel_listings (product_id, channel_id, channel_sku, asin, title, price, status)

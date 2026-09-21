@@ -13,6 +13,7 @@
  */
 
 require('dotenv').config();
+require('./gog-env');
 
 const { Pool } = require('pg');
 const { SellingPartner } = require('amazon-sp-api');
@@ -36,6 +37,27 @@ function tsvParse(text) {
   const header = lines[0].split('\t');
   const rows = lines.slice(1).map((l) => l.split('\t'));
   return { header, rows };
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableReportError(error) {
+  const detail = `${error?.code || ''} ${error?.message || ''}`;
+  return /REPORT_PROCESSING_(?:FATAL|CANCELLED|CANCELLED_MANUALLY)|Something went wrong while processing the report|Report did not finish/i.test(detail);
+}
+
+async function downloadReportWithRetry(sp, params, label, { retries = 2, delayMs = 30000 } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await sp.downloadReport(params);
+    } catch (error) {
+      if (attempt >= retries || !isRetryableReportError(error)) throw error;
+      console.warn(`${label} report processing failed (${error?.code || error?.message || error}); retrying in ${Math.round(delayMs / 1000)}s.`);
+      await sleep(delayMs);
+    }
+  }
 }
 
 function escapeHtml(s) {
@@ -108,17 +130,37 @@ async function main() {
     try {
       console.log('Refreshing Amazon FBA inventory into Postgres (MYI report)...');
 
-      // Preload channel SKU -> product_id mapping (avoids N+1 queries)
+      // Preload Amazon SKU -> product_id mapping (avoids N+1 queries)
       const mapRes = await pool.query(
-        `SELECT cl.channel_sku, cl.product_id
-         FROM public.channel_listings cl
-         WHERE cl.channel_id = $1`,
+        `SELECT sku, product_id
+         FROM (
+           SELECT cl.channel_sku AS sku, cl.product_id, 0 AS priority
+           FROM public.channel_listings cl
+           WHERE cl.channel_id = $1
+           UNION ALL
+           SELECT pi.id_value AS sku, pi.product_id, 1 AS priority
+           FROM public.product_identifiers pi
+           JOIN public.products p ON p.id = pi.product_id
+           WHERE pi.id_type = 'amazon_sku'
+             AND pi.active = true
+             AND p.deprecated = false
+           UNION ALL
+           SELECT p.internal_sku AS sku, p.id AS product_id, 2 AS priority
+           FROM public.products p
+           WHERE p.deprecated = false
+         ) sku_map
+         WHERE sku IS NOT NULL AND sku <> ''
+         ORDER BY priority`,
         [amazonChannelId]
       );
-      const skuToProductId = new Map(mapRes.rows.map((r) => [String(r.channel_sku), String(r.product_id)]));
+      const skuToProductId = new Map();
+      for (const r of mapRes.rows) {
+        const sku = String(r.sku);
+        if (!skuToProductId.has(sku)) skuToProductId.set(sku, String(r.product_id));
+      }
 
       // Download the inventory report (TSV)
-      const myiTsv = await sp.downloadReport({
+      const myiTsv = await downloadReportWithRetry(sp, {
         body: {
           reportType: 'GET_FBA_MYI_ALL_INVENTORY_DATA',
           marketplaceIds: [MARKETPLACE_ID]
@@ -126,7 +168,7 @@ async function main() {
         interval: 15000,
         cancel_after: 12,
         download: { unzip: true, charset: 'utf8' }
-      });
+      }, 'Amazon MYI');
 
       const parsed = tsvParse(myiTsv);
       const header = parsed.header;
@@ -161,16 +203,18 @@ async function main() {
         const sellerSku = String(r[cSku] || '').trim();
         if (!sellerSku) continue;
 
-        const productId = skuToProductId.get(sellerSku);
-        if (!productId) {
-          misses++;
-          if (missingSkus.length < 200) missingSkus.push(sellerSku);
-          continue;
-        }
-
         const available = num(r[cFulfillable]);
         const reserved = num(r[cReserved]);
         const inbound = num(r[cInboundWorking]) + num(r[cInboundShipped]) + num(r[cInboundReceiving]);
+
+        const productId = skuToProductId.get(sellerSku);
+        if (!productId) {
+          if (available || reserved || inbound) {
+            misses++;
+            if (missingSkus.length < 200) missingSkus.push(sellerSku);
+          }
+          continue;
+        }
 
         await pool.query(
           `INSERT INTO public.inventory (
@@ -226,12 +270,12 @@ async function main() {
     };
 
     // Use library helper to create + poll + download (more robust than manual polling).
-    const tsv = await sp.downloadReport({
+    const tsv = await downloadReportWithRetry(sp, {
       body,
       interval: 15000,
       cancel_after: 12,
       download: { unzip: true, charset: 'utf8' }
-    });
+    }, 'Amazon restock');
 
     const { header, rows } = tsvParse(tsv);
     const idx = Object.fromEntries(header.map((h, i) => [h, i]));

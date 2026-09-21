@@ -12,6 +12,7 @@
  */
 
 require('dotenv').config();
+require('../gog-env');
 
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');

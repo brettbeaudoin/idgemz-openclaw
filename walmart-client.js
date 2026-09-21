@@ -125,6 +125,9 @@ class WalmartClient {
       'WM_QOS.CORRELATION_ID': this._correlationId(),
       'WM_SVC.NAME': this.serviceName,
       'WM_CONSUMER.CHANNEL.TYPE': this.consumerChannelType,
+      'WM_MARKET': 'US',
+      'WM_GLOBAL_VERSION': '3.1',
+      'wm_audit.origin_source': 'SELLER_API',
       ...headers
     };
 

@@ -3,12 +3,16 @@
 // Generates the daily sales report (yesterday PT) and sends the summary to Brett on Telegram.
 
 const { execFileSync } = require('child_process');
+const fs = require('fs');
 const path = require('path');
 
 require('dotenv').config({ path: path.resolve(__dirname, '.env.local') });
 require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 
-const { generateDailySalesReport } = require('./daily-sales-report');
+const {
+  generateDailySalesReport,
+  persistImprovementStateUpdate
+} = require('./daily-sales-report');
 
 function toPlainTelegramSummary(report) {
   const formatCurrency = (amount) => `$${Number(amount || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`;
@@ -43,17 +47,26 @@ function toPlainTelegramSummary(report) {
 async function main() {
   const channel = process.env.DAILY_REPORT_CHANNEL || 'telegram';
   const target = process.env.DAILY_REPORT_TELEGRAM_TARGET || '8130524019';
-  const { report } = await generateDailySalesReport();
+  const attachmentDir = process.env.DAILY_REPORT_ATTACHMENT_DIR || path.join('/tmp', 'openclaw', 'idgemz');
+  const { report, improvements } = await generateDailySalesReport({ persistImprovementState: false });
   const body = toPlainTelegramSummary(report);
+  const attachmentPath = path.join(attachmentDir, `daily-sales-report-${report.date}.html`);
+
+  fs.mkdirSync(attachmentDir, { recursive: true });
+  fs.copyFileSync('/tmp/idgemz-daily-report.html', attachmentPath);
 
   execFileSync('openclaw', [
     'message', 'send',
     '--channel', channel,
     '--target', target,
-    '--message', body
+    '--message', body,
+    '--media', attachmentPath,
+    '--force-document'
   ], { stdio: 'inherit', timeout: 120000 });
 
-  console.log(`Sent Telegram daily sales summary for ${report.date} to ${target}.`);
+  persistImprovementStateUpdate(improvements);
+
+  console.log(`Sent Telegram daily sales summary and HTML attachment for ${report.date} to ${target}.`);
 }
 
 if (require.main === module) {

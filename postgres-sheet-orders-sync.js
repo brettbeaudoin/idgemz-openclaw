@@ -12,10 +12,10 @@
 // - Units = sum across SKU quantity columns (we write a formula).
 // - Total = PRE-tax, PRE-shipping: SUM(quantity * unit_price) across order_items.
 // - SKU columns are literal header names.
-//   - Amazon: mapping via product_identifiers amazon_sku → google_sheet_sku.
-//   - Shopify: we map order_items.raw->>'sku' directly to header name when possible.
+// - SKU→sheet-header mappings come from public.product_identifiers only.
 
 require('dotenv').config();
+require('./gog-env');
 
 const { SellingPartner } = require('amazon-sp-api');
 const { Pool } = require('pg');
@@ -104,6 +104,65 @@ async function gogSheetsMetadata() {
   return res.data;
 }
 
+async function ensurePivotSourceCoversOrders({ vals }) {
+  const lastNonEmpty = findLastNonEmptyRow(vals, 4);
+  if (!lastNonEmpty) return;
+
+  const sheets = await getSheetsClient();
+  const md = await sheets.spreadsheets.get({
+    spreadsheetId: SHEET_ID
+  });
+  const pivotData = await sheets.spreadsheets.get({
+    spreadsheetId: SHEET_ID,
+    ranges: ['Pivot - Orders!B1'],
+    includeGridData: true
+  });
+
+  const ordersSheet = (md.data.sheets || []).find((s) => s?.properties?.title === SHEET_NAME);
+  const pivotSheet = (md.data.sheets || []).find((s) => s?.properties?.title === 'Pivot - Orders');
+  const pivotDataSheet = (pivotData.data.sheets || []).find((s) => s?.properties?.title === 'Pivot - Orders');
+  const pivotCell = pivotDataSheet?.data?.[0]?.rowData?.[0]?.values?.[0];
+  const pivotTable = pivotCell?.pivotTable;
+  if (!ordersSheet || !pivotSheet || !pivotTable?.source) return;
+
+  const targetEndRowIndex = Math.max(
+    ordersSheet.properties?.gridProperties?.rowCount || 0,
+    lastNonEmpty
+  );
+
+  if ((pivotTable.source.endRowIndex || 0) >= targetEndRowIndex) return;
+
+  pivotTable.source = {
+    ...pivotTable.source,
+    sheetId: ordersSheet.properties.sheetId,
+    startRowIndex: 15,
+    endRowIndex: targetEndRowIndex,
+    startColumnIndex: 0,
+    endColumnIndex: 3
+  };
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SHEET_ID,
+    requestBody: {
+      requests: [{
+        updateCells: {
+          range: {
+            sheetId: pivotSheet.properties.sheetId,
+            startRowIndex: 0,
+            endRowIndex: 1,
+            startColumnIndex: 1,
+            endColumnIndex: 2
+          },
+          rows: [{ values: [{ pivotTable }] }],
+          fields: 'pivotTable'
+        }
+      }]
+    }
+  });
+
+  console.log(`Expanded Pivot - Orders source through Orders row ${targetEndRowIndex}.`);
+}
+
 function numToCol(n) {
   let s = '';
   let x = n;
@@ -135,8 +194,7 @@ function round2(n) {
   return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 }
 
-// Load channel SKU → google_sheet_sku mapping from the database.
-// Supports: amazon_sku, shopify_sku, etsy_sku, walmart_sku → google_sheet_sku
+// Load channel SKU → google_sheet_sku mapping from the single identifier table.
 async function loadChannelSkuMap(pool, channelIdType) {
   const res = await pool.query(
     `WITH ch AS (
@@ -156,18 +214,6 @@ async function loadChannelSkuMap(pool, channelIdType) {
   const m = new Map();
   for (const r of res.rows) m.set(String(r.channel_sku), String(r.google_sheet_sku));
   return m;
-}
-
-// Deprecated: JSON file overrides. Kept as fallback during migration.
-function loadSkuMappingOverrides(channel) {
-  try {
-    const p = require('path').resolve(__dirname, 'sheet-sku-mapping.json');
-    if (!fs.existsSync(p)) return {};
-    const j = JSON.parse(fs.readFileSync(p, 'utf8'));
-    return j?.channels?.[channel] || {};
-  } catch (e) {
-    return {};
-  }
 }
 
 let amazonSpClientPromise = null;
@@ -285,7 +331,6 @@ async function buildRowsForPtDate({ pool, header, headerIndex, datePt, channel }
   const channelLabel = channel.label;
   const channelId = channel.id;
 
-  const overrideSkuToHeader = loadSkuMappingOverrides(channelLabel);
   const skuMap = channel.skuMap || new Map();
 
   const required = ['Date', 'Total', 'Units', 'Sales Channel', 'NOTES'];
@@ -307,6 +352,7 @@ async function buildRowsForPtDate({ pool, header, headerIndex, datePt, channel }
             o.order_total AS order_total,
             o.order_date AS order_date,
             oi.quantity AS quantity,
+            oi.total AS line_total,
             oi.raw AS item_raw,
             CASE
               WHEN $3 = 'amazon' THEN COALESCE(oi.unit_price, fb.unit_price)
@@ -409,9 +455,15 @@ async function buildRowsForPtDate({ pool, header, headerIndex, datePt, channel }
 
     if (Number.isFinite(qty)) o.units += qty;
 
-    // Revenue (pre-tax). For Amazon, unitPrice may come from fallback pricing.
+    const lineTotal = r.line_total == null ? null : Number(r.line_total);
+
+    // Revenue (pre-tax). For Amazon, prefer the stored line total when known
+    // because bulk discounts can produce fractional per-unit prices that do not
+    // round cleanly into order-level totals.
     // For Shopify, unitPrice is adjusted for discount allocations above.
-    if (Number.isFinite(qty) && Number.isFinite(unitPrice)) {
+    if (channel.platform === 'amazon' && Number.isFinite(lineTotal)) {
+      o.total += lineTotal;
+    } else if (Number.isFinite(qty) && Number.isFinite(unitPrice)) {
       o.total += qty * unitPrice;
     }
 
@@ -419,7 +471,7 @@ async function buildRowsForPtDate({ pool, header, headerIndex, datePt, channel }
       // Amazon: skuMap maps SellerSKU -> sheet header.
       // Shopify: we try direct header match by SKU.
       const directHeader = headerIndex[sku] != null ? sku : null;
-      const headerName = skuMap.get(sku) || overrideSkuToHeader[sku] || directHeader;
+      const headerName = skuMap.get(sku) || directHeader;
       if (headerName) {
         o.qtyByHeader.set(headerName, (o.qtyByHeader.get(headerName) || 0) + qty);
       } else {
@@ -502,10 +554,14 @@ async function rebuildDateBlock({ pool, header, headerIndex, datePt, channel, sh
   const chanIdx = headerIndex['Sales Channel'];
 
   const matchingRowNums = [];
+  const dateRowNums = [];
+  const laterDateRowNums = [];
   for (let i = 0; i < existingRows.length; i++) {
     const r = existingRows[i] || [];
     const d = String(r[dateIdx] ?? '').trim();
     const c = String(r[chanIdx] ?? '').trim();
+    if (d === dateSheet) dateRowNums.push(tailStart + i);
+    if (d > dateSheet) laterDateRowNums.push(tailStart + i);
     if (d === dateSheet && c === channelLabel) matchingRowNums.push(tailStart + i);
   }
 
@@ -516,6 +572,17 @@ async function rebuildDateBlock({ pool, header, headerIndex, datePt, channel, sh
     startRow = Math.min(...matchingRowNums);
     const endExisting = Math.max(...matchingRowNums);
     existingCount = endExisting - startRow + 1;
+  } else if (dateRowNums.length) {
+    // Insert missing channel rows directly after existing rows for the same date.
+    // This keeps multi-day catch-up runs chronological instead of appending older
+    // Shopify/Etsy/Walmart rows after newer Amazon blocks.
+    startRow = Math.max(...dateRowNums) + 1;
+    existingCount = 0;
+  } else if (laterDateRowNums.length) {
+    // If the entire date is missing but newer dates are already present, insert
+    // before the first newer date rather than appending at the bottom.
+    startRow = Math.min(...laterDateRowNums);
+    existingCount = 0;
   } else {
     // Append at end
     startRow = lastNonEmpty + 1;
@@ -532,6 +599,15 @@ async function rebuildDateBlock({ pool, header, headerIndex, datePt, channel, sh
     if (wouldOverwriteLiveRows) {
       await gogInsertRows(SHEET_NAME, oldEndExisting + 1, growth);
       vals.splice(oldEndExisting, 0, ...Array.from({ length: growth }, () => Array(header.length).fill('')));
+    }
+  }
+
+  if (targetCount > 0 && existingCount === 0 && startRow <= lastNonEmpty) {
+    const overlapRows = vals.slice(startRow - 1, startRow - 1 + targetCount);
+    const wouldOverwriteLiveRows = overlapRows.some((r) => (r || []).slice(0, 4).some((x) => String(x ?? '').trim()));
+    if (wouldOverwriteLiveRows) {
+      await gogInsertRows(SHEET_NAME, startRow, targetCount);
+      vals.splice(startRow - 1, 0, ...Array.from({ length: targetCount }, () => Array(header.length).fill('')));
     }
   }
 
@@ -628,7 +704,7 @@ async function main() {
       loadChannelSkuMap(pool, 'amazon_sku'),
       loadChannelSkuMap(pool, 'shopify_sku'),
       loadChannelSkuMap(pool, 'etsy_sku'),
-      loadChannelSkuMap(pool, 'amazon_sku'), // Walmart SKUs currently match Amazon SKUs
+      loadChannelSkuMap(pool, 'walmart_sku'),
     ]);
 
     const channels = [
@@ -655,6 +731,8 @@ async function main() {
         await rebuildDateBlock({ pool, header, headerIndex, datePt: d, channel: ch, sheetState: { colCount, lastCol, vals } });
       }
     }
+
+    await ensurePivotSourceCoversOrders({ vals });
   } finally {
     await pool.end();
   }

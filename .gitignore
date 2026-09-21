@@ -30,6 +30,7 @@ qbo-tokens/
 # Data files (reports, imports, cached)
 data/
 /tmp/
+backups/
 
 # OS junk
 .DS_Store

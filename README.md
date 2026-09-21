@@ -37,7 +37,7 @@ Managed by [OpenClaw](https://openclaw.ai/) (Dangerboat 🤖).
 - `shopify-client.js` / `walmart-client.js` — API client helpers
 - `migrations/` — Postgres schema migrations
 - `dashboard-*.json` / `configure-grafana*.js` — Grafana dashboard configs
-- `sheet-sku-mapping.json` — SKU → Google Sheet column mapping per channel
+- `public.product_identifiers` — SKU → Google Sheet column mapping per channel
 
 ## Setup
 

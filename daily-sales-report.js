@@ -54,6 +54,16 @@ function readImprovementLogForEmail({ reportDateStr }) {
   return { markdown: md, updatedState, statePath };
 }
 
+function persistImprovementStateUpdate(improvements) {
+  if (!improvements?.updatedState || !improvements?.statePath) return;
+
+  try {
+    fs.writeFileSync(improvements.statePath, JSON.stringify(improvements.updatedState, null, 2));
+  } catch (e) {
+    console.warn('Could not write improvements-state.json:', e?.message || e);
+  }
+}
+
 // Database connection
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://localhost/idgemz'
@@ -141,7 +151,172 @@ async function fetchAmazonOrderMetricsForPtDay(dateStr) {
   };
 }
 
-async function generateDailySalesReport() {
+function getSkuFamily(sku, title = '') {
+  const text = `${sku || ''} ${title || ''}`.toUpperCase();
+
+  if (text.includes('DF') || text.includes('DUMPSTER')) return 'DF';
+  if (text.includes('FLAG') || text.includes('PATRIOTIC') || text.includes('MADE IN USA')) return 'Flag';
+  if (text.includes('NK250')) return 'NK250';
+  if (text.includes('CF') || text.includes('CARBON FIBER')) return 'CF';
+  if (text.includes('YUBI') && (text.includes('RSA') || text.includes('BHT2STE-RSA') || text.includes('BHT3STE-RSA'))) return 'RSA+Yubi';
+  if (text.includes('YUBI')) return 'Yubi';
+  if (
+    text.includes('GO6') || text.includes('GO 6') ||
+    text.includes('GO7') || text.includes('GO 7') ||
+    text.includes('ETOKEN') || text.includes('HID') ||
+    text.includes('SUREPASS') || /(^|[-_\s])SP($|[-_\s])/.test(sku || '')
+  ) return 'Other Token';
+  if (/^BHT[123]STE-V2$/i.test(sku || '')) return 'Stealth RSA';
+  if (/^BHT[123]STE$/i.test(sku || '')) return 'Legacy RSA';
+
+  return 'Other';
+}
+
+function makeEmptyFamilyMetric(name) {
+  return {
+    family: name,
+    recentUnits: 0,
+    recentRevenue: 0,
+    previousUnits: 0,
+    previousRevenue: 0,
+    unitDelta: 0,
+    revenueDelta: 0,
+    weeklyUnits: []
+  };
+}
+
+async function getSalesTrends(reportDateStr) {
+  const reportDate = DateTime.fromISO(reportDateStr, { zone: 'America/Los_Angeles' }).startOf('day');
+  const recentStart = reportDate.minus({ days: 29 }).toISODate();
+  const previousStart = reportDate.minus({ days: 59 }).toISODate();
+  const weekStart = reportDate.minus({ weeks: 11 }).startOf('week').toISODate();
+  const endExclusive = reportDate.plus({ days: 1 }).toISODate();
+  const bulkStart = reportDate.minus({ days: 29 }).toISODate();
+  const familyOrder = ['Stealth RSA', 'Yubi', 'CF', 'Flag', 'DF', 'RSA+Yubi', 'Other Token'];
+
+  const trendRows = await pool.query(`
+    SELECT
+      to_char((o.order_date AT TIME ZONE 'America/Los_Angeles')::date, 'YYYY-MM-DD') AS date_pt,
+      to_char(date_trunc('week', (o.order_date AT TIME ZONE 'America/Los_Angeles')::date), 'YYYY-MM-DD') AS week_pt,
+      p.internal_sku AS sku,
+      p.title,
+      SUM(oi.quantity)::int AS units,
+      COALESCE(SUM(oi.quantity * oi.unit_price), 0)::numeric AS revenue
+    FROM orders o
+    JOIN order_items oi ON oi.order_id = o.id
+    JOIN channel_listings cl ON cl.id = oi.channel_listing_id
+    JOIN products p ON p.id = cl.product_id
+    WHERE (o.order_date AT TIME ZONE 'America/Los_Angeles')::date >= $1::date
+      AND (o.order_date AT TIME ZONE 'America/Los_Angeles')::date < $2::date
+      AND COALESCE(o.status,'') <> 'Pending'
+    GROUP BY 1, 2, 3, 4
+    ORDER BY 1
+  `, [weekStart, endExclusive]);
+
+  const families = new Map(familyOrder.map((name) => [name, makeEmptyFamilyMetric(name)]));
+  const weekLabels = [];
+  const lastWeekStart = reportDate.startOf('week');
+  for (let d = DateTime.fromISO(weekStart); d <= lastWeekStart; d = d.plus({ weeks: 1 })) {
+    weekLabels.push(d.toISODate());
+  }
+
+  for (const row of trendRows.rows) {
+    const family = getSkuFamily(row.sku, row.title);
+    if (!families.has(family)) families.set(family, makeEmptyFamilyMetric(family));
+
+    const metric = families.get(family);
+    const units = Number(row.units || 0);
+    const revenue = Number(row.revenue || 0);
+
+    if (row.date_pt >= recentStart) {
+      metric.recentUnits += units;
+      metric.recentRevenue += revenue;
+    } else if (row.date_pt >= previousStart) {
+      metric.previousUnits += units;
+      metric.previousRevenue += revenue;
+    }
+
+    const weekIndex = weekLabels.indexOf(row.week_pt);
+    if (weekIndex >= 0) {
+      metric.weeklyUnits[weekIndex] = (metric.weeklyUnits[weekIndex] || 0) + units;
+    }
+  }
+
+  const familyMetrics = [...families.values()]
+    .map((metric) => {
+      const weeklyUnits = weekLabels.map((_, index) => metric.weeklyUnits[index] || 0);
+      return {
+        ...metric,
+        weeklyUnits,
+        unitDelta: metric.recentUnits - metric.previousUnits,
+        revenueDelta: metric.recentRevenue - metric.previousRevenue
+      };
+    })
+    .filter((metric) => familyOrder.includes(metric.family) || metric.recentUnits);
+
+  const recentUnits = familyMetrics.reduce((sum, metric) => sum + metric.recentUnits, 0);
+  const familyMix = familyMetrics
+    .filter((metric) => metric.recentUnits > 0)
+    .map((metric) => ({
+      family: metric.family,
+      units: metric.recentUnits,
+      share: recentUnits > 0 ? metric.recentUnits / recentUnits : 0
+    }))
+    .sort((a, b) => b.units - a.units);
+
+  const bulkRows = await pool.query(`
+    SELECT
+      to_char((o.order_date AT TIME ZONE 'America/Los_Angeles')::date, 'YYYY-MM-DD') AS date_pt,
+      c.platform,
+      o.channel_order_id,
+      p.internal_sku AS sku,
+      p.title,
+      SUM(oi.quantity)::int AS units,
+      COALESCE(SUM(oi.quantity * oi.unit_price), 0)::numeric AS revenue
+    FROM orders o
+    JOIN channels c ON c.id = o.channel_id
+    JOIN order_items oi ON oi.order_id = o.id
+    JOIN channel_listings cl ON cl.id = oi.channel_listing_id
+    JOIN products p ON p.id = cl.product_id
+    WHERE (o.order_date AT TIME ZONE 'America/Los_Angeles')::date >= $1::date
+      AND (o.order_date AT TIME ZONE 'America/Los_Angeles')::date < $2::date
+      AND COALESCE(o.status,'') <> 'Pending'
+    GROUP BY 1, 2, 3, 4, 5
+    HAVING SUM(oi.quantity) >= 5
+    ORDER BY units DESC, revenue DESC
+    LIMIT 8
+  `, [bulkStart, endExclusive]);
+
+  const biggestGainer = familyMetrics
+    .filter((metric) => metric.unitDelta > 0)
+    .sort((a, b) => b.unitDelta - a.unitDelta)[0] || null;
+  const biggestCooler = familyMetrics
+    .filter((metric) => metric.unitDelta < 0)
+    .sort((a, b) => a.unitDelta - b.unitDelta)[0] || null;
+
+  return {
+    recentStart,
+    previousStart,
+    reportDate: reportDateStr,
+    weekLabels,
+    families: familyMetrics,
+    familyMix,
+    bulkSignals: bulkRows.rows.map((row) => ({
+      date: row.date_pt,
+      channel: row.platform,
+      orderId: row.channel_order_id,
+      family: getSkuFamily(row.sku, row.title),
+      sku: row.sku,
+      title: row.title,
+      units: Number(row.units || 0),
+      revenue: Number(row.revenue || 0)
+    })),
+    biggestGainer,
+    biggestCooler
+  };
+}
+
+async function generateDailySalesReport({ persistImprovementState = true } = {}) {
   try {
     // Report day is always yesterday in Pacific Time to match Amazon Seller dashboard boundaries.
     const reportDatePt = DateTime.now().setZone('America/Los_Angeles').minus({ days: 1 }).startOf('day');
@@ -237,6 +412,8 @@ async function generateDailySalesReport() {
       GROUP BY o.channel_order_id, p.title, p.internal_sku
       ORDER BY o.channel_order_id, revenue DESC
     `, [reportDateStr]);
+
+    const salesTrends = await getSalesTrends(reportDateStr);
     
     // Channel breakdown (PT day) for non-Amazon channels
     const nonAmazonByChannel = await pool.query(`
@@ -300,7 +477,8 @@ async function generateDailySalesReport() {
         sku: row.sku,
         unitsSold: parseInt(row.units_sold),
         revenue: parseFloat(row.revenue)
-      }))
+      })),
+      salesTrends
     };
     
     // Create HTML email
@@ -315,15 +493,11 @@ async function generateDailySalesReport() {
     fs.writeFileSync('/tmp/idgemz-daily-report.json', JSON.stringify(report, null, 2));
 
     // Persist improvements-state if we included any new entries
-    if (improvements.updatedState && improvements.statePath) {
-      try {
-        fs.writeFileSync(improvements.statePath, JSON.stringify(improvements.updatedState, null, 2));
-      } catch (e) {
-        console.warn('Could not write improvements-state.json:', e?.message || e);
-      }
+    if (persistImprovementState) {
+      persistImprovementStateUpdate(improvements);
     }
     
-    return { htmlReport, telegramSummary, report };
+    return { htmlReport, telegramSummary, report, improvements };
     
   } catch (error) {
     console.error('Error generating report:', error);
@@ -341,6 +515,115 @@ function generateHtmlReport(report, { improvementsMarkdown } = {}) {
   };
   
   const formatCurrency = (amount) => `$${amount.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`;
+  const escapeHtml = (value) => String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+  const improvementsHtml = improvementsMarkdown
+    ? `
+    <h2>🛠️ Recent Improvements / Bug Fixes</h2>
+    <div class="warning"><pre style="white-space: pre-wrap; margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px;">${escapeHtml(improvementsMarkdown)}</pre></div>`
+    : '';
+  const fmtNumber = (value) => Number(value || 0).toLocaleString('en-US');
+  const trendSign = (value) => value > 0 ? '+' : '';
+  const signedCurrency = (value) => `${value > 0 ? '+' : value < 0 ? '-' : ''}${formatCurrency(Math.abs(value))}`;
+  const sparklinePoints = (values, width = 140, height = 34) => {
+    const max = Math.max(...values, 1);
+    if (values.length === 1) return `0,${height - (values[0] / max * height)}`;
+    return values.map((value, index) => {
+      const x = (index / (values.length - 1)) * width;
+      const y = height - (value / max * height);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(' ');
+  };
+  const familyColors = {
+    'Stealth RSA': '#2563eb',
+    Yubi: '#16a34a',
+    CF: '#374151',
+    Flag: '#dc2626',
+    DF: '#f97316',
+    'RSA+Yubi': '#7c3aed',
+    'Other Token': '#0891b2',
+    NK250: '#ca8a04',
+    Other: '#64748b'
+  };
+  const maxTrendUnits = Math.max(
+    ...(report.salesTrends?.families || []).flatMap((metric) => [metric.recentUnits, metric.previousUnits]),
+    1
+  );
+  const familyTrendHtml = report.salesTrends?.families?.length
+    ? `
+    <h2>📈 Sales Trends</h2>
+    <div class="trend-note">SKU-family trends use item-level order rows for attribution. Bars compare the latest 30 days ending ${escapeHtml(report.salesTrends.reportDate)} against the prior 30 days.</div>
+    <div class="trend-callouts">
+      <div class="callout">
+        <span class="label">Biggest gainer</span>
+        <strong>${escapeHtml(report.salesTrends.biggestGainer?.family || 'None')}</strong>
+        <span>${report.salesTrends.biggestGainer ? `${trendSign(report.salesTrends.biggestGainer.unitDelta)}${fmtNumber(report.salesTrends.biggestGainer.unitDelta)} units` : 'No family grew'}</span>
+      </div>
+      <div class="callout">
+        <span class="label">Biggest cooler</span>
+        <strong>${escapeHtml(report.salesTrends.biggestCooler?.family || 'None')}</strong>
+        <span>${report.salesTrends.biggestCooler ? `${fmtNumber(report.salesTrends.biggestCooler.unitDelta)} units` : 'No family cooled'}</span>
+      </div>
+    </div>
+    <div class="trend-list">
+      ${report.salesTrends.families.map((metric) => {
+        const color = familyColors[metric.family] || familyColors.Other;
+        const lastWidth = Math.max((metric.recentUnits / maxTrendUnits) * 100, metric.recentUnits ? 4 : 0);
+        const prevWidth = Math.max((metric.previousUnits / maxTrendUnits) * 100, metric.previousUnits ? 4 : 0);
+        const deltaClass = metric.unitDelta >= 0 ? 'positive' : 'negative';
+        return `
+        <div class="trend-row">
+          <div class="trend-name">${escapeHtml(metric.family)}</div>
+          <div class="trend-bars">
+            <div class="bar-line"><span>Last 30</span><div class="bar-track"><div class="bar-fill" style="width:${lastWidth.toFixed(1)}%; background:${color};"></div></div><strong>${fmtNumber(metric.recentUnits)}</strong></div>
+            <div class="bar-line previous"><span>Prior</span><div class="bar-track"><div class="bar-fill" style="width:${prevWidth.toFixed(1)}%;"></div></div><strong>${fmtNumber(metric.previousUnits)}</strong></div>
+          </div>
+          <div class="spark">
+            <svg viewBox="0 0 140 34" role="img" aria-label="${escapeHtml(metric.family)} weekly units">
+              <polyline points="${sparklinePoints(metric.weeklyUnits)}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></polyline>
+            </svg>
+          </div>
+          <div class="trend-delta ${deltaClass}">
+            ${trendSign(metric.unitDelta)}${fmtNumber(metric.unitDelta)} units<br>
+            ${signedCurrency(metric.revenueDelta)}
+          </div>
+        </div>`;
+      }).join('')}
+    </div>
+    <div class="mix-strip" aria-label="Latest 30-day family mix">
+      ${report.salesTrends.familyMix.map((metric) => `<div title="${escapeHtml(metric.family)}: ${fmtNumber(metric.units)} units" style="width:${(metric.share * 100).toFixed(1)}%; background:${familyColors[metric.family] || familyColors.Other};"></div>`).join('')}
+    </div>
+    <div class="mix-legend">
+      ${report.salesTrends.familyMix.map((metric) => `<span><i style="background:${familyColors[metric.family] || familyColors.Other};"></i>${escapeHtml(metric.family)} ${fmtNumber(metric.units)}</span>`).join('')}
+    </div>`
+    : '';
+  const bulkSignalsHtml = report.salesTrends?.bulkSignals?.length
+    ? `
+    <h2>🏢 Bulk / B2B Signals</h2>
+    <table>
+      <tr>
+        <th>Date</th>
+        <th>Channel</th>
+        <th>Family</th>
+        <th>SKU</th>
+        <th>Units</th>
+        <th>Revenue</th>
+      </tr>
+      ${report.salesTrends.bulkSignals.map((row) => `
+      <tr>
+        <td>${escapeHtml(row.date)}</td>
+        <td>${escapeHtml(String(row.channel || '').toUpperCase())}</td>
+        <td>${escapeHtml(row.family)}</td>
+        <td>${escapeHtml(row.sku)}</td>
+        <td>${row.units}</td>
+        <td>${formatCurrency(row.revenue)}</td>
+      </tr>`).join('')}
+    </table>`
+    : '';
   
   return `
 <!DOCTYPE html>
@@ -362,6 +645,31 @@ function generateHtmlReport(report, { improvementsMarkdown } = {}) {
         .positive { color: #27ae60; }
         .negative { color: #e74c3c; }
         .warning { background-color: #fff3cd; padding: 15px; border-radius: 5px; margin: 20px 0; }
+        .trend-note { color: #5f6b7a; font-size: 13px; margin-top: -8px; }
+        .trend-callouts { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin: 16px 0; }
+        .callout { background: #f8f9fa; border-left: 4px solid #3498db; padding: 12px; border-radius: 6px; }
+        .callout .label { display: block; color: #5f6b7a; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+        .callout strong { display: block; font-size: 18px; color: #2c3e50; }
+        .trend-list { border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; margin-top: 12px; }
+        .trend-row { display: grid; grid-template-columns: 94px 1fr 150px 92px; gap: 12px; align-items: center; padding: 12px; border-bottom: 1px solid #e5e7eb; }
+        .trend-row:last-child { border-bottom: 0; }
+        .trend-name { font-weight: bold; color: #2c3e50; }
+        .bar-line { display: grid; grid-template-columns: 48px 1fr 42px; gap: 8px; align-items: center; font-size: 12px; margin: 3px 0; }
+        .bar-line span { color: #5f6b7a; }
+        .bar-track { height: 9px; background: #eef2f7; border-radius: 99px; overflow: hidden; }
+        .bar-fill { height: 100%; border-radius: 99px; background: #9ca3af; }
+        .bar-line.previous .bar-fill { background: #cbd5e1; }
+        .spark svg { width: 140px; height: 34px; background: #f8fafc; border-radius: 6px; }
+        .trend-delta { text-align: right; font-size: 12px; font-weight: bold; font-variant-numeric: tabular-nums; }
+        .mix-strip { display: flex; height: 16px; margin-top: 16px; overflow: hidden; border-radius: 99px; background: #eef2f7; }
+        .mix-strip div { min-width: 2px; }
+        .mix-legend { display: flex; flex-wrap: wrap; gap: 10px 14px; margin-top: 8px; font-size: 12px; color: #4b5563; }
+        .mix-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; }
+        @media (max-width: 700px) {
+          .summary-grid, .trend-callouts { grid-template-columns: 1fr; }
+          .trend-row { grid-template-columns: 1fr; }
+          .trend-delta { text-align: left; }
+        }
     </style>
 </head>
 <body>
@@ -427,31 +735,17 @@ function generateHtmlReport(report, { improvementsMarkdown } = {}) {
         </tr>
         ${report.topProducts.map((product, index) => `
         <tr>
-            <td>${index === 0 ? '🥇 ' : index === 1 ? '🥈 ' : '🥉 '}${product.product}</td>
-            <td>${product.sku}</td>
+            <td>${index === 0 ? '🥇 ' : index === 1 ? '🥈 ' : '🥉 '}${escapeHtml(product.product)}</td>
+            <td>${escapeHtml(product.sku)}</td>
             <td>${product.unitsSold}</td>
             <td>${formatCurrency(product.revenue)}</td>
         </tr>
         `).join('')}
     </table>
+    ${familyTrendHtml}
+    ${bulkSignalsHtml}
     
-    <h2>📦 Recent Orders (all line items from yesterday)</h2>
-    <table>
-        <tr>
-            <th>Product</th>
-            <th>SKU</th>
-            <th>Units Sold</th>
-            <th>Revenue</th>
-        </tr>
-        ${report.orders.map((row) => `
-        <tr>
-            <td>${row.product}</td>
-            <td>${row.sku}</td>
-            <td>${row.unitsSold}</td>
-            <td>${formatCurrency(row.revenue)}</td>
-        </tr>
-        `).join('')}
-    </table>
+    ${improvementsHtml}
 
     <hr style="margin-top: 50px;">
     <p style="text-align: center; color: #7f8c8d;">
@@ -488,7 +782,7 @@ function generateTelegramSummary(report) {
     summary += `${medal} ${product.product}\n   ${product.unitsSold} units = ${formatCurrency(product.revenue)}\n`;
   });
   
-  summary += `\n📧 Full report sent to brett@nerdwidgets.com`;
+  summary += `\n📲 Full report delivered via Telegram`;
   
   return summary;
 }
@@ -509,4 +803,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { generateDailySalesReport };
+module.exports = { generateDailySalesReport, persistImprovementStateUpdate };

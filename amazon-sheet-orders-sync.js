@@ -15,6 +15,7 @@
 //   SHEET_ID=... node amazon-sheet-orders-sync.js
 
 require('dotenv').config();
+require('./gog-env');
 const { SellingPartner } = require('amazon-sp-api');
 const { Pool } = require('pg');
 const { DateTime } = require('luxon');
@@ -112,53 +113,23 @@ async function convertToUsd(amount, fromCurrency, datePt) {
   return out;
 }
 
-function loadSheetSkuConfig() {
-  try {
-    const p = require('path').resolve(__dirname, 'sheet-sku-mapping.json');
-    if (!fs.existsSync(p)) return {};
-    return JSON.parse(fs.readFileSync(p, 'utf8'));
-  } catch (e) {
-    console.warn('Warning: failed to load sheet-sku-mapping.json:', e?.message || e);
-    return {};
-  }
-}
-
-function loadSkuMappingOverrides(channel) {
-  const j = loadSheetSkuConfig();
-  return j?.channels?.[channel] || {};
-}
-
-function loadSkuPrices(channel) {
-  const j = loadSheetSkuConfig();
-  return j?.skuPrices?.[channel] || {};
-}
-
-function buildSkuToColname(headerRow, channel = 'Amazon') {
-  // Hard-coded defaults aligned to this specific NerdWidgets sheet.
-  // Prefer using sheet-sku-mapping.json overrides for channel-specific SKUs.
-  const map = {
-
-    'BHT1STE-V2': 'BH-T1 RSA Stealth V2',
-    'BHT2STE-V2': 'BH-T2 RSA Stealth V2',
-    'BHT3STE-V2': 'BH-T3 RSA Stealth V2',
-    'BHT1STE-YUBI-V2': 'BH-T1 Yubi V2',
-    'BHT1STE-YUBI-V1': 'BH-T1 Yubi V1 Slot',
-    'BHT2STE-RSA-YUBI-V2': 'BH-T2 RSA & Yubi V2',
-    'BHT2STE-RSA-YUBI': 'BH-T2 RSA & Yubi V1',
-    'BHT2STE-RSA-ET': 'BH-T2 RSA & ET',
-    'BHT2STE': 'BH-T2 RSA Stealth V1',
-    'BHT2STE-YUBI-V1': 'BH-T2 Yubi V1',
-    'BHT2FLAG': 'BH-T2 RSA Flag V2',
-    'BHT2FLAG-V2': 'BH-T2 RSA Flag V2',
-    'BHT1FLAG-V2': 'BH-T1 RSA Flag V2',
-    'BHT1DF': 'BH-T1-DF',
-    'BHT1STE-ET': 'BH-T1 EToken'
-  };
-
-  // Apply overrides (Option B: grouped SKUs, and/or per-channel SKU names)
-  const overrides = loadSkuMappingOverrides(channel);
-  for (const [sku, col] of Object.entries(overrides)) map[sku] = col;
-
+async function loadAmazonSkuToColname(pool, headerRow) {
+  const res = await pool.query(
+    `WITH amazon AS (
+       SELECT product_id, id_value AS amazon_sku
+       FROM public.product_identifiers
+       WHERE id_type = 'amazon_sku' AND active = true
+     ), sheet AS (
+       SELECT product_id, id_value AS google_sheet_sku
+       FROM public.product_identifiers
+       WHERE id_type = 'google_sheet_sku' AND active = true
+     )
+     SELECT amazon.amazon_sku, sheet.google_sheet_sku
+     FROM amazon
+     JOIN sheet ON sheet.product_id = amazon.product_id`
+  );
+  const map = {};
+  for (const r of res.rows) map[String(r.amazon_sku)] = String(r.google_sheet_sku);
   const headerSet = new Set(headerRow);
   const missingCols = Object.values(map).filter((c) => !headerSet.has(c));
   if (missingCols.length) {
@@ -362,7 +333,7 @@ async function main() {
     headerIndex.Units = headerIndex['Units'];
     headerIndex.SalesChannel = headerIndex['Sales Channel'];
 
-    const skuToColname = buildSkuToColname(header, 'Amazon');
+    const skuToColname = await loadAmazonSkuToColname(pool, header);
 
     // Find last non-empty row (A:D)
     const vals = gogSheetsGet(`${SHEET_NAME}!A1:D20000`);
@@ -418,7 +389,7 @@ async function main() {
 
     // IMPORTANT: Never exclude Pending + $0.00 orders.
     // If the report yields 0 totals for such orders, hydrate totals from Orders API (excluding tax).
-    await hydrateZeroTotalsFromOrdersApi(sp, reportOrders, loadSkuPrices('Amazon'));
+    await hydrateZeroTotalsFromOrdersApi(sp, reportOrders);
 
     // --- Repair pass (today only): fill "placeholder" rows that have totals/units but no SKU quantities.
     // This can happen if we previously inserted incomplete rows due to missing SKU mapping.

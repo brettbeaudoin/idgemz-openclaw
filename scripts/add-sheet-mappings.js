@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 // Add/ensure google_sheet_sku + amazon_sku mappings in normalized product_identifiers.
-// This is for mappings that existed in amazon-sheet-orders-sync.js hardcoded list
-// but were missing from sheet-sku-mapping.json.
+// One-off helper for adding mappings directly to Postgres.
+// Runtime sheet syncs should use public.product_identifiers as the only SKU→sheet mapping source.
 
 const crypto = require('crypto');
 const { Client } = require('pg');

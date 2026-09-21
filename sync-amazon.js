@@ -19,12 +19,8 @@ function deriveAmazonPerUnitPrice(item) {
   const lineItemPrice = item?.ItemPrice?.Amount != null ? Number(item.ItemPrice.Amount) : null;
   if (!Number.isFinite(lineItemPrice)) return null;
 
-  // Amazon sometimes returns ItemPrice for the shipped subset while QuantityOrdered still reflects
-  // the full ordered quantity (common on pending bulk orders / quantity-price rows).
-  // Prefer shipped quantity when it produces a sane per-unit value; otherwise fall back to ordered qty.
-  if (qtyShipped > 0 && qtyOrdered > qtyShipped) {
-    return lineItemPrice / qtyShipped;
-  }
+  // Amazon Orders API ItemPrice is the line total, even when only part of the
+  // ordered quantity has shipped. Store a per-unit price for sheet/report math.
   if (qtyOrdered > 0) return lineItemPrice / qtyOrdered;
   if (qtyShipped > 0) return lineItemPrice / qtyShipped;
   return lineItemPrice;
