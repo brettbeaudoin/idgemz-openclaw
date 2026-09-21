@@ -1,0 +1,47 @@
+{
+  "id": "openclaw-memory-milvus",
+  "name": "OpenClaw Memory Milvus",
+  "description": "Recall canonical OpenClaw memory chunks from the local Postgres + Milvus memory stack.",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "envPath": {
+        "type": "string",
+        "description": "Path to the memory-stack .env file."
+      },
+      "databaseUrl": {
+        "type": "string",
+        "description": "Postgres manifest database URL."
+      },
+      "milvusAddress": {
+        "type": "string",
+        "description": "Milvus host:port."
+      },
+      "milvusCollection": {
+        "type": "string",
+        "description": "Milvus collection name."
+      },
+      "ollamaEmbeddingEndpoint": {
+        "type": "string",
+        "description": "Ollama /api/embed endpoint."
+      },
+      "ollamaEmbeddingModel": {
+        "type": "string",
+        "description": "Ollama embedding model."
+      },
+      "embeddingQueryPrefix": {
+        "type": "string",
+        "description": "Optional prefix prepended to embedding queries."
+      }
+    }
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": [
+      "memory_recall"
+    ]
+  }
+}
