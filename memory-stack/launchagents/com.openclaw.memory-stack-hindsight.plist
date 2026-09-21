@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.openclaw.memory-stack-hindsight</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/bbeaudoin/clawd/idgemz-openclaw/scripts/cron-memory-stack-refresh.sh</string>
+    <string>hindsight</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Minute</key>
+    <integer>22</integer>
+  </dict>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>WorkingDirectory</key>
+  <string>/Users/bbeaudoin/clawd/idgemz-openclaw</string>
+  <key>StandardOutPath</key>
+  <string>/Users/bbeaudoin/clawd/idgemz-openclaw/logs/launchd-memory-stack-hindsight.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/bbeaudoin/clawd/idgemz-openclaw/logs/launchd-memory-stack-hindsight.err.log</string>
+</dict>
+</plist>

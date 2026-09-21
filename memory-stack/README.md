@@ -65,6 +65,36 @@ When changing Milvus embedding model or collection, use:
 npm run reindex-milvus
 ```
 
+## Scheduler
+
+Live OpenClaw recall depends on Postgres + Milvus, so the fast refresh runs
+often:
+
+```bash
+/Users/bbeaudoin/clawd/idgemz-openclaw/scripts/cron-memory-stack-refresh.sh fast
+```
+
+The fast mode runs `npm run index-milvus`, which applies the Postgres manifest
+and indexes only pending Milvus spans. The ingest path scans and hashes source
+files every time, but unchanged files only refresh `memory_sources.last_seen_at`;
+they do not rewrite spans or enqueue Milvus/Hindsight work.
+
+Hindsight is slower and not in the live recall path, so it runs hourly:
+
+```bash
+/Users/bbeaudoin/clawd/idgemz-openclaw/scripts/cron-memory-stack-refresh.sh hindsight
+```
+
+On Brett's Mac these are installed as user LaunchAgents because `crontab <file>`
+hung during setup and prior cron reliability has been spotty:
+
+- `~/Library/LaunchAgents/com.openclaw.memory-stack-fast.plist` runs every 300 seconds.
+- `~/Library/LaunchAgents/com.openclaw.memory-stack-hindsight.plist` runs hourly at minute 22.
+
+Tracked copies live in `memory-stack/launchagents/` for GitHub/reference. After
+changing scheduler behavior, update both the installed LaunchAgent and the
+tracked copy.
+
 ## Rollback
 
 Rollback never depends on Hindsight or Milvus because source files remain

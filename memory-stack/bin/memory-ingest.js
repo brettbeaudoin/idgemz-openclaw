@@ -184,6 +184,9 @@ async function ensureSchema(pool) {
 async function writeManifest(pool, sources, mode) {
   await ensureSchema(pool);
   const root = sourceRoot();
+  const staleMilvusIds = [];
+  let skippedSources = 0;
+  let changedSources = 0;
   const run = await pool.query(
     `INSERT INTO memory_ingest_runs (mode, source_root, source_count, span_count)
      VALUES ($1, $2, $3, $4)
@@ -194,14 +197,49 @@ async function writeManifest(pool, sources, mode) {
 
   for (const source of sources) {
     const existingSource = await pool.query(
-      `SELECT id
+      `SELECT id, content_sha256, parser_version
        FROM memory_sources
        WHERE abs_path = $1`,
       [source.absPath]
     );
-    if (existingSource.rows[0]?.id) {
-      source.id = existingSource.rows[0].id;
+    const existing = existingSource.rows[0];
+    if (existing?.id) {
+      source.id = existing.id;
+      if (existing.content_sha256 === source.contentSha256 && existing.parser_version === PARSER_VERSION) {
+        skippedSources += 1;
+        await pool.query(
+          `UPDATE memory_sources
+           SET rel_path = $2,
+               source_type = $3,
+               size_bytes = $4,
+               mtime_ms = $5,
+               metadata = $6,
+               last_seen_at = now()
+           WHERE id = $1`,
+          [
+            source.id,
+            source.relPath,
+            source.sourceType,
+            source.sizeBytes,
+            source.mtimeMs,
+            { privacy: process.env.MEMORY_PRIVACY_TAG || 'personal' }
+          ]
+        );
+        const savedSpans = await pool.query(
+          `SELECT id, span_index
+           FROM memory_spans
+           WHERE source_id = $1`,
+          [source.id]
+        );
+        const savedSpanIds = new Map(savedSpans.rows.map((row) => [row.span_index, row.id]));
+        for (const span of source.spans) {
+          const savedId = savedSpanIds.get(span.spanIndex);
+          if (savedId) span.id = savedId;
+        }
+        continue;
+      }
     }
+    changedSources += 1;
 
     await pool.query(
       `INSERT INTO memory_sources (
@@ -288,7 +326,49 @@ async function writeManifest(pool, sources, mode) {
         );
       }
     }
+
+    const staleSpans = await pool.query(
+      `DELETE FROM memory_spans
+       WHERE source_id = $1
+         AND span_index >= $2
+       RETURNING id`,
+      [source.id, source.spans.length]
+    );
+    staleMilvusIds.push(...staleSpans.rows.map((row) => row.id));
   }
+
+  const currentAbsPaths = sources.map((source) => source.absPath);
+  const pruneProjectDocs = boolEnv('MEMORY_INCLUDE_PROJECT_DOCS');
+  const deletedSources = await pool.query(
+    `SELECT id
+     FROM memory_sources
+     WHERE abs_path <> ALL($1::text[])
+       AND ($2::boolean OR source_type IN ('workspace-context', 'daily-note'))`,
+    [currentAbsPaths, pruneProjectDocs]
+  );
+  const deletedSourceIds = deletedSources.rows.map((row) => row.id);
+  if (deletedSourceIds.length > 0) {
+    const deletedSpans = await pool.query(
+      `SELECT id
+       FROM memory_spans
+       WHERE source_id = ANY($1::text[])`,
+      [deletedSourceIds]
+    );
+    staleMilvusIds.push(...deletedSpans.rows.map((row) => row.id));
+    await pool.query(
+      `DELETE FROM memory_sources
+       WHERE id = ANY($1::text[])`,
+      [deletedSourceIds]
+    );
+  }
+
+  const obsoleteOutbox = await pool.query(
+    `DELETE FROM memory_outbox ob
+     USING memory_spans sp
+     WHERE ob.span_id = sp.id
+       AND ob.content_sha256 <> sp.text_sha256
+     RETURNING ob.id`
+  );
 
   await pool.query(
     `UPDATE memory_ingest_runs
@@ -296,7 +376,14 @@ async function writeManifest(pool, sources, mode) {
      WHERE id = $1`,
     [runId]
   );
-  return runId;
+  return {
+    runId,
+    skippedSources,
+    changedSources,
+    deletedSources: deletedSourceIds.length,
+    obsoleteOutboxRows: obsoleteOutbox.rows.length,
+    staleMilvusIds
+  };
 }
 
 async function retainInHindsight(pool, sources) {
@@ -477,6 +564,40 @@ async function dropMilvusCollection() {
   }
 }
 
+function milvusString(value) {
+  return JSON.stringify(String(value));
+}
+
+async function deleteMilvusRows(ids) {
+  const uniqueIds = [...new Set(ids)].filter(Boolean);
+  if (uniqueIds.length === 0) return 0;
+  const client = new MilvusClient({
+    address: process.env.MILVUS_ADDRESS || 'localhost:19531',
+    token: process.env.MILVUS_TOKEN || undefined
+  });
+  try {
+    await client.connectPromise;
+    const collectionName = process.env.MILVUS_COLLECTION || 'openclaw_chunks_v1';
+    const has = await client.hasCollection({ collection_name: collectionName });
+    assertOk(has, 'Milvus hasCollection');
+    if (!has.value) return 0;
+
+    const batchSize = 128;
+    let deleted = 0;
+    for (let i = 0; i < uniqueIds.length; i += batchSize) {
+      const batch = uniqueIds.slice(i, i + batchSize);
+      assertOk(await client.delete({
+        collection_name: collectionName,
+        filter: `id in [${batch.map(milvusString).join(',')}]`
+      }), 'Milvus delete');
+      deleted += batch.length;
+    }
+    return deleted;
+  } finally {
+    await client.closeConnection();
+  }
+}
+
 function allSpans(sources) {
   return sources.flatMap((source) => source.spans.map((span) => ({
     ...span,
@@ -589,7 +710,8 @@ async function main() {
   });
   try {
     const mode = ['apply', indexMilvus && 'index-milvus', retain && 'retain-hindsight'].filter(Boolean).join('+');
-    const runId = await writeManifest(pool, sources, mode);
+    const manifest = await writeManifest(pool, sources, mode);
+    console.log(`Manifest changed ${manifest.changedSources} source(s), skipped ${manifest.skippedSources} unchanged source(s), deleted ${manifest.deletedSources} missing source(s), pruned ${manifest.obsoleteOutboxRows} obsolete outbox row(s).`);
     if (indexMilvus) {
       if (reindexMilvus) {
         await dropMilvusCollection();
@@ -599,10 +721,14 @@ async function main() {
            WHERE target = 'milvus'`
         );
       }
+      if (!reindexMilvus) {
+        const deleted = await deleteMilvusRows(manifest.staleMilvusIds);
+        if (deleted > 0) console.log(`Deleted ${deleted} stale Milvus row(s).`);
+      }
       const indexed = await indexInMilvus(pool, sources);
       await pool.query(
         `UPDATE memory_ingest_runs SET indexed_milvus_count = $2 WHERE id = $1`,
-        [runId, indexed]
+        [manifest.runId, indexed]
       );
       console.log(`Indexed ${indexed} source spans in Milvus.`);
     }
@@ -610,7 +736,7 @@ async function main() {
       const retained = await retainInHindsight(pool, sources);
       await pool.query(
         `UPDATE memory_ingest_runs SET retained_hindsight_count = $2 WHERE id = $1`,
-        [runId, retained]
+        [manifest.runId, retained]
       );
       console.log(`Retained ${retained} source documents in Hindsight.`);
     }
