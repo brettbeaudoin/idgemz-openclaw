@@ -15,14 +15,14 @@
         "heading_3jETLt": {
           "type": "heading",
           "settings": {
-            "heading": "<strong>Precision-Engineered Protection for Modern Credentials</strong>",
+            "heading": "<strong>Badge holders built for secure teams</strong>",
             "heading_size": "h2"
           }
         },
         "text_MTCkPa": {
           "type": "text",
           "settings": {
-            "text": "<p>At IDGemz, we design badge holders that meet the modern security landscape. From government agencies to corporate campuses, our holders keep IDs and MFA tokens protected, accessible, and always in the right place. </p>"
+            "text": "<p>Made-in-USA holders for RSA SecurID, YubiKey, SafeNet, GO-series, FortiToken, and everyday ID cards. Choose flexible TPU or premium carbon-fiber-reinforced PLA-CF, then scale up for teams that need dependable credential carry.</p>"
           }
         }
       },
@@ -37,15 +37,15 @@
         "color_scheme": "",
         "full_width": true,
         "padding_top": 40,
-        "padding_bottom": 52
+        "padding_bottom": 28
       }
     },
     "featured_collection": {
       "type": "featured-collection",
       "settings": {
-        "title": "Our Most Popular Holders",
-        "heading_size": "h1",
-        "description": "",
+        "title": "Shop Popular Badge Holders",
+        "heading_size": "h2",
+        "description": "<p>Start with the holders customers buy most, then pick the exact token and badge capacity on the product page.</p>",
         "show_description": true,
         "description_style": "body",
         "collection": "badge-holders",
@@ -64,8 +64,8 @@
         "quick_add": "standard",
         "columns_mobile": "2",
         "swipe_on_mobile": true,
-        "padding_top": 0,
-        "padding_bottom": 36
+        "padding_top": 16,
+        "padding_bottom": 28
       }
     },
     "17742036786e2d5d1b": {
@@ -313,11 +313,44 @@
       "settings": {
         "include_margins": true
       }
+    },
+    "idgemz_shop_paths": {
+      "type": "custom-liquid",
+      "name": "Shop by credential",
+      "settings": {
+        "color_scheme": "scheme-1",
+        "padding_top": 16,
+        "padding_bottom": 32,
+        "custom_liquid": "<style>\n  .idgemz-paths { display: grid; gap: 1rem; }\n  .idgemz-paths__header { max-width: 760px; }\n  .idgemz-paths__header h2 { margin: 0 0 .5rem; }\n  .idgemz-paths__grid { display: grid; gap: .9rem; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }\n  .idgemz-paths__link { display: block; min-height: 132px; border: 1px solid rgba(var(--color-foreground), .16); padding: 1rem; text-decoration: none; color: rgb(var(--color-foreground)); background: rgba(var(--color-background), 1); }\n  .idgemz-paths__link:hover { border-color: rgba(var(--color-foreground), .42); }\n  .idgemz-paths__link strong { display: block; font-size: 1.05rem; margin-bottom: .45rem; }\n  .idgemz-paths__link span { display: block; color: rgba(var(--color-foreground), .72); font-size: .95rem; line-height: 1.35; }\n</style>\n<div class=\"page-width idgemz-paths\">\n  <div class=\"idgemz-paths__header\">\n    <h2>Find the holder that fits your token</h2>\n    <p>Skip the guessing. Shop by the credential you carry every day.</p>\n  </div>\n  <div class=\"idgemz-paths__grid\">\n    <a class=\"idgemz-paths__link\" href=\"{{ routes.collections_url }}/rsa-securid\"><strong>RSA SecurID</strong><span>One, two, or three-token holders for classic RSA workflows.</span></a>\n    <a class=\"idgemz-paths__link\" href=\"{{ routes.collections_url }}/yubikey\"><strong>YubiKey 5 NFC</strong><span>Low-profile holders for USB-A and USB-C YubiKey users.</span></a>\n    <a class=\"idgemz-paths__link\" href=\"{{ routes.collections_url }}/go6-go7\"><strong>GO-6 and GO-7</strong><span>Badge holders shaped for Digipass token carry.</span></a>\n    <a class=\"idgemz-paths__link\" href=\"{{ routes.collections_url }}/safenet-etoken\"><strong>SafeNet eToken</strong><span>Purpose-built holders for SafeNet token setups.</span></a>\n  </div>\n</div>"
+      }
+    },
+    "idgemz_bulk_cta": {
+      "type": "custom-liquid",
+      "name": "Bulk and team orders",
+      "settings": {
+        "color_scheme": "scheme-2",
+        "padding_top": 36,
+        "padding_bottom": 40,
+        "custom_liquid": "<style>\n  .idgemz-bulk { display: grid; gap: 1.25rem; align-items: center; }\n  .idgemz-bulk h2 { margin: 0 0 .5rem; }\n  .idgemz-bulk p { margin: 0; max-width: 760px; }\n  .idgemz-bulk__points { display: grid; gap: .7rem; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); margin-top: .25rem; }\n  .idgemz-bulk__point { border-left: 3px solid rgba(var(--color-foreground), .55); padding-left: .8rem; }\n  .idgemz-bulk__actions { display: flex; gap: .75rem; flex-wrap: wrap; }\n</style>\n<div class=\"page-width idgemz-bulk\">\n  <div>\n    <h2>Ordering for a team?</h2>\n    <p>IDGemz can help with staff refreshes, security teams, healthcare units, schools, events, and custom token combinations. Tell us what your team carries and how many holders you need.</p>\n  </div>\n  <div class=\"idgemz-bulk__points\">\n    <div class=\"idgemz-bulk__point\">Quantity-friendly ordering for teams and departments</div>\n    <div class=\"idgemz-bulk__point\">Flexible TPU and premium PLA-CF options</div>\n    <div class=\"idgemz-bulk__point\">Custom multi-token layouts available on request</div>\n  </div>\n  <div class=\"idgemz-bulk__actions\">\n    <a class=\"button\" href=\"{{ routes.root_url }}pages/contact\">Request a bulk quote</a>\n    <a class=\"button button--secondary\" href=\"{{ routes.collections_url }}/badge-holders\">Shop all holders</a>\n  </div>\n</div>"
+      }
+    },
+    "idgemz_material_compare": {
+      "type": "custom-liquid",
+      "name": "Material comparison",
+      "settings": {
+        "color_scheme": "scheme-1",
+        "padding_top": 28,
+        "padding_bottom": 36,
+        "custom_liquid": "<style>\n  .idgemz-materials { display: grid; gap: 1rem; }\n  .idgemz-materials__grid { display: grid; gap: .9rem; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }\n  .idgemz-materials__item { border: 1px solid rgba(var(--color-foreground), .16); padding: 1rem; }\n  .idgemz-materials__item h3 { margin: 0 0 .45rem; }\n  .idgemz-materials__item p { margin: 0; color: rgba(var(--color-foreground), .72); }\n</style>\n<div class=\"page-width idgemz-materials\">\n  <h2>Choose the feel that fits the job</h2>\n  <div class=\"idgemz-materials__grid\">\n    <div class=\"idgemz-materials__item\"><h3>Flexible TPU</h3><p>Soft, quiet, and shatter-resistant for everyday badge and token carry.</p></div>\n    <div class=\"idgemz-materials__item\"><h3>Premium PLA-CF</h3><p>Rigid carbon-fiber-reinforced holders with a crisp professional feel.</p></div>\n  </div>\n</div>"
+      }
     }
   },
   "order": [
     "rich_text_6q6xRE",
+    "idgemz_shop_paths",
     "featured_collection",
+    "idgemz_bulk_cta",
+    "idgemz_material_compare",
     "17742036786e2d5d1b",
     "slideshow_XDrXMX",
     "video_YhQmR4",
