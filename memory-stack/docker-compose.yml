@@ -47,6 +47,8 @@ services:
     depends_on:
       hindsight-db:
         condition: service_healthy
+      tei:
+        condition: service_started
     ports:
       - "${HINDSIGHT_API_PORT:-8888}:8888"
       - "${HINDSIGHT_DASHBOARD_PORT:-9999}:9999"
@@ -56,9 +58,9 @@ services:
       HINDSIGHT_API_PORT: "8888"
       HINDSIGHT_API_WORKER_ID: ${HINDSIGHT_API_WORKER_ID:-openclaw-hindsight-local}
       HINDSIGHT_API_LOG_LEVEL: ${HINDSIGHT_API_LOG_LEVEL:-info}
-      HINDSIGHT_API_LLM_PROVIDER: ${HINDSIGHT_API_LLM_PROVIDER:-openai}
-      HINDSIGHT_API_LLM_MODEL: ${HINDSIGHT_API_LLM_MODEL:-}
-      HINDSIGHT_API_LLM_BASE_URL: ${HINDSIGHT_API_LLM_BASE_URL:-}
+      HINDSIGHT_API_LLM_PROVIDER: ${HINDSIGHT_API_LLM_PROVIDER:-ollama}
+      HINDSIGHT_API_LLM_MODEL: ${HINDSIGHT_API_LLM_MODEL:-qwen3:8b}
+      HINDSIGHT_API_LLM_BASE_URL: ${HINDSIGHT_API_LLM_BASE_URL:-http://host.docker.internal:11434/v1}
       HINDSIGHT_API_LLM_API_KEY: ${HINDSIGHT_API_LLM_API_KEY:-}
       HINDSIGHT_API_LLM_TRACE_ENABLED: ${HINDSIGHT_API_LLM_TRACE_ENABLED:-false}
       HINDSIGHT_API_RETAIN_EXTRACTION_MODE: ${HINDSIGHT_API_RETAIN_EXTRACTION_MODE:-concise}
@@ -67,7 +69,9 @@ services:
       HINDSIGHT_API_ENABLE_AUTO_CONSOLIDATION: ${HINDSIGHT_API_ENABLE_AUTO_CONSOLIDATION:-true}
       HINDSIGHT_API_RETAIN_MISSION: "${HINDSIGHT_API_RETAIN_MISSION:-Extract durable facts, decisions, preferences, incidents, lessons, project state, and recurring patterns that would help Dangerboat assist Brett later. Ignore filler, tool noise, and transient status unless it changes future behavior.}"
       HINDSIGHT_API_OBSERVATIONS_MISSION: "${HINDSIGHT_API_OBSERVATIONS_MISSION:-Synthesize durable evidence-grounded beliefs, preferences, operating patterns, project history, and changes over time. Preserve uncertainty and contradictions.}"
-      HINDSIGHT_API_EMBEDDINGS_PROVIDER: ${HINDSIGHT_API_EMBEDDINGS_PROVIDER:-onnx}
+      HINDSIGHT_API_EMBEDDINGS_PROVIDER: ${HINDSIGHT_API_EMBEDDINGS_PROVIDER:-tei}
+      HINDSIGHT_API_EMBEDDINGS_TEI_URL: ${HINDSIGHT_API_EMBEDDINGS_TEI_URL:-http://tei:80}
+      HINDSIGHT_API_EMBEDDINGS_TEI_BATCH_SIZE: ${HINDSIGHT_API_EMBEDDINGS_TEI_BATCH_SIZE:-32}
       HINDSIGHT_API_EMBEDDINGS_ONNX_MODEL_ID: ${HINDSIGHT_API_EMBEDDINGS_ONNX_MODEL_ID:-intfloat/multilingual-e5-small}
       HINDSIGHT_API_EMBEDDINGS_ONNX_FILE: ${HINDSIGHT_API_EMBEDDINGS_ONNX_FILE:-onnx/model.onnx}
       HINDSIGHT_API_EMBEDDINGS_ONNX_DIMENSIONS: ${HINDSIGHT_API_EMBEDDINGS_ONNX_DIMENSIONS:-384}
@@ -79,6 +83,8 @@ services:
       HINDSIGHT_API_RERANKER_PROVIDER: ${HINDSIGHT_API_RERANKER_PROVIDER:-rrf}
     volumes:
       - hindsight-models:/app/models
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks: [memory-net]
 
   etcd:
@@ -100,7 +106,7 @@ services:
     networks: [memory-net]
 
   minio:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
     container_name: openclaw-milvus-minio
     restart: unless-stopped
     environment:
@@ -131,6 +137,7 @@ services:
 
   tei:
     image: ghcr.io/huggingface/text-embeddings-inference:cpu-latest
+    platform: ${TEI_PLATFORM:-linux/amd64}
     container_name: openclaw-tei
     restart: unless-stopped
     command:
@@ -154,4 +161,3 @@ volumes:
   milvus-minio-data:
   milvus-data:
   tei-data:
-

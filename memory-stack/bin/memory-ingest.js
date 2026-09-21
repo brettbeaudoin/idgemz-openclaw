@@ -9,9 +9,11 @@ require('dotenv').config({ path: path.resolve(__dirname, '..', '..', '.env.local
 require('dotenv').config({ path: path.resolve(__dirname, '..', '..', '.env'), quiet: true });
 
 const { Pool } = require('pg');
+const { DataType, MetricType, MilvusClient } = require('@zilliz/milvus2-sdk-node');
 
 const PARSER_VERSION = 'file-parser-v1';
-const CHUNK_RECIPE = 'file-span-v1/plain-v1/e5-small';
+const CHUNK_RECIPE = process.env.MEMORY_CHUNK_RECIPE || 'file-span-v1/plain-v1/all-minilm-l6-v2';
+const MILVUS_VECTOR_FIELD = 'embedding';
 const TEXT_EXTENSIONS = new Set(['.md', '.txt', '.json', '.jsonl', '.log']);
 const CODE_EXTENSIONS = new Set(['.js', '.ts', '.py', '.sh', '.sql', '.yaml', '.yml']);
 const DEFAULT_CONTEXT_FILES = new Set([
@@ -58,13 +60,20 @@ function intEnv(name, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+function assertOk(result, action) {
+  const status = result?.status || result;
+  const code = status?.error_code;
+  if (code == null || code === 'Success' || code === 0) return;
+  throw new Error(`${action} failed: ${code} ${status?.reason || ''}`.trim());
+}
+
 function sourceRoot() {
   return path.resolve(process.env.MEMORY_WORKSPACE_ROOT || '/Users/bbeaudoin/clawd');
 }
 
 function sourceType(absPath, relPath) {
   if (/^memory\/\d{4}-\d{2}-\d{2}\.md$/.test(relPath)) return 'daily-note';
-  if (['SOUL.md', 'USER.md', 'CURRENT.md', 'OPS.md', 'TOOLS.md', 'MEMORY.md', 'HEARTBEAT.md'].includes(relPath)) {
+  if (['AGENTS.md', 'CONTEXT.md', 'SOUL.md', 'USER.md', 'CURRENT.md', 'OPS.md', 'TOOLS.md', 'MEMORY.md', 'HEARTBEAT.md'].includes(relPath)) {
     return 'workspace-context';
   }
   if (relPath.includes('/session') || relPath.includes('session')) return 'session-log';
@@ -280,14 +289,21 @@ async function writeManifest(pool, sources, mode) {
   return runId;
 }
 
-async function retainInHindsight(sources) {
+async function retainInHindsight(pool, sources) {
   const baseUrl = (process.env.HINDSIGHT_BASE_URL || 'http://localhost:8888').replace(/\/+$/, '');
   const bankId = process.env.HINDSIGHT_BANK_ID || 'openclaw-v1';
   const headers = { 'content-type': 'application/json' };
   if (process.env.HINDSIGHT_API_KEY) headers.authorization = `Bearer ${process.env.HINDSIGHT_API_KEY}`;
 
   let retained = 0;
-  for (const source of sources) {
+  const pending = await pool.query(
+    `SELECT DISTINCT document_id
+     FROM memory_outbox
+     WHERE target = 'hindsight'
+       AND status = 'pending'`
+  );
+  const pendingDocuments = new Set(pending.rows.map((row) => row.document_id));
+  for (const source of sources.filter((source) => pendingDocuments.has(`file:${source.relPath}`))) {
     const content = fs.readFileSync(source.absPath, 'utf8');
     const payload = {
       items: [{
@@ -327,11 +343,186 @@ async function retainInHindsight(sources) {
     });
     if (!response.ok) {
       const body = await response.text();
+      await pool.query(
+        `UPDATE memory_outbox
+         SET attempts = attempts + 1, last_error = $2, updated_at = now()
+         WHERE target = 'hindsight'
+           AND document_id = $1`,
+        [`file:${source.relPath}`, `HTTP ${response.status} ${body.slice(0, 1000)}`]
+      );
       throw new Error(`Hindsight retain failed for ${source.relPath}: HTTP ${response.status} ${body.slice(0, 1000)}`);
     }
     retained += 1;
+    await pool.query(
+      `UPDATE memory_outbox
+       SET status = 'sent', attempts = attempts + 1, last_error = null, updated_at = now()
+       WHERE target = 'hindsight'
+         AND document_id = $1`,
+      [`file:${source.relPath}`]
+    );
   }
   return retained;
+}
+
+async function embedTexts(texts) {
+  const provider = (process.env.EMBEDDING_PROVIDER || 'tei').toLowerCase();
+  const prefix = process.env.EMBEDDING_PASSAGE_PREFIX ?? '';
+  if (provider === 'ollama') {
+    const endpoint = (process.env.OLLAMA_EMBEDDING_ENDPOINT || 'http://localhost:11434/api/embed').replace(/\/+$/, '');
+    const model = process.env.OLLAMA_EMBEDDING_MODEL || process.env.EMBEDDING_MODEL || 'nomic-embed-text';
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        input: texts.map((text) => `${prefix}${text}`)
+      })
+    });
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`Ollama embedding request failed: HTTP ${response.status} ${body.slice(0, 1000)}`);
+    }
+    const payload = await response.json();
+    const vectors = payload?.embeddings;
+    if (!Array.isArray(vectors) || vectors.length !== texts.length) {
+      throw new Error(`Ollama embedding response had ${Array.isArray(vectors) ? vectors.length : 'no'} vectors for ${texts.length} inputs`);
+    }
+    return vectors;
+  }
+
+  const endpoint = (process.env.EMBEDDING_ENDPOINT || 'http://localhost:8081').replace(/\/+$/, '');
+  const response = await fetch(`${endpoint}/embed`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ inputs: texts.map((text) => `${prefix}${text}`) })
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Embedding request failed: HTTP ${response.status} ${body.slice(0, 1000)}`);
+  }
+  const payload = await response.json();
+  const vectors = Array.isArray(payload)
+    ? payload
+    : payload?.data?.map((item) => item.embedding);
+  if (!Array.isArray(vectors) || vectors.length !== texts.length) {
+    throw new Error(`Embedding response had ${Array.isArray(vectors) ? vectors.length : 'no'} vectors for ${texts.length} inputs`);
+  }
+  return vectors;
+}
+
+async function ensureMilvusCollection(client) {
+  const collectionName = process.env.MILVUS_COLLECTION || 'openclaw_chunks_v1';
+  const dim = intEnv('EMBEDDING_DIM', 384);
+  const has = await client.hasCollection({ collection_name: collectionName });
+  assertOk(has, 'Milvus hasCollection');
+  if (!has.value) {
+    assertOk(await client.createCollection({
+      collection_name: collectionName,
+      description: 'OpenClaw canonical file spans with source-path provenance. Rebuildable from files and Postgres manifest.',
+      fields: [
+        { name: 'id', data_type: DataType.VarChar, is_primary_key: true, max_length: 64 },
+        { name: 'source_id', data_type: DataType.VarChar, max_length: 64 },
+        { name: 'document_id', data_type: DataType.VarChar, max_length: 1024 },
+        { name: 'rel_path', data_type: DataType.VarChar, max_length: 1024 },
+        { name: 'abs_path', data_type: DataType.VarChar, max_length: 2048 },
+        { name: 'source_type', data_type: DataType.VarChar, max_length: 64 },
+        { name: 'start_line', data_type: DataType.Int64 },
+        { name: 'end_line', data_type: DataType.Int64 },
+        { name: 'text_sha256', data_type: DataType.VarChar, max_length: 64 },
+        { name: 'content_sha256', data_type: DataType.VarChar, max_length: 64 },
+        { name: 'chunk_recipe', data_type: DataType.VarChar, max_length: 128 },
+        { name: 'text', data_type: DataType.VarChar, max_length: 8192 },
+        { name: 'metadata', data_type: DataType.JSON },
+        { name: MILVUS_VECTOR_FIELD, data_type: DataType.FloatVector, dim }
+      ],
+      index_params: [{
+        field_name: MILVUS_VECTOR_FIELD,
+        index_name: 'idx_openclaw_embedding_hnsw',
+        index_type: 'HNSW',
+        metric_type: MetricType.COSINE,
+        params: { M: 16, efConstruction: 128 }
+      }]
+    }), 'Milvus createCollection');
+  }
+  assertOk(await client.loadCollectionSync({ collection_name: collectionName }), 'Milvus loadCollectionSync');
+  return collectionName;
+}
+
+function allSpans(sources) {
+  return sources.flatMap((source) => source.spans.map((span) => ({
+    ...span,
+    source
+  })));
+}
+
+async function indexInMilvus(pool, sources) {
+  const client = new MilvusClient({
+    address: process.env.MILVUS_ADDRESS || 'localhost:19531',
+    token: process.env.MILVUS_TOKEN || undefined
+  });
+  try {
+    await client.connectPromise;
+    const collectionName = await ensureMilvusCollection(client);
+    const pending = await pool.query(
+      `SELECT span_id
+       FROM memory_outbox
+       WHERE target = 'milvus'
+         AND status = 'pending'`
+    );
+    const pendingSpanIds = new Set(pending.rows.map((row) => row.span_id));
+    const spans = allSpans(sources).filter((span) => pendingSpanIds.has(span.id));
+    const batchSize = intEnv('MILVUS_INDEX_BATCH_SIZE', 32);
+    let indexed = 0;
+
+    for (let i = 0; i < spans.length; i += batchSize) {
+      const batch = spans.slice(i, i + batchSize);
+      const vectors = await embedTexts(batch.map((span) => span.text));
+      const rows = batch.map((span, offset) => ({
+        id: span.id,
+        source_id: span.source.id,
+        document_id: `file:${span.source.relPath}`,
+        rel_path: span.source.relPath,
+        abs_path: span.source.absPath,
+        source_type: span.source.sourceType,
+        start_line: span.startLine,
+        end_line: span.endLine,
+        text_sha256: span.textSha256,
+        content_sha256: span.source.contentSha256,
+        chunk_recipe: CHUNK_RECIPE,
+        text: span.text.slice(0, 8192),
+        metadata: {
+          parser_version: PARSER_VERSION,
+          privacy: process.env.MEMORY_PRIVACY_TAG || 'personal'
+        },
+        [MILVUS_VECTOR_FIELD]: vectors[offset]
+      }));
+      try {
+        assertOk(await client.upsert({ collection_name: collectionName, data: rows }), 'Milvus upsert');
+      } catch (err) {
+        await pool.query(
+          `UPDATE memory_outbox
+           SET attempts = attempts + 1, last_error = $2, updated_at = now()
+           WHERE target = 'milvus'
+             AND span_id = ANY($1::text[])`,
+          [rows.map((row) => row.id), String(err?.message || err).slice(0, 1000)]
+        );
+        throw err;
+      }
+      indexed += rows.length;
+
+      await pool.query(
+        `UPDATE memory_outbox
+         SET status = 'sent', attempts = attempts + 1, last_error = null, updated_at = now()
+         WHERE target = 'milvus'
+           AND span_id = ANY($1::text[])`,
+        [rows.map((row) => row.id)]
+      );
+    }
+
+    return indexed;
+  } finally {
+    await client.closeConnection();
+  }
 }
 
 function printSummary(sources) {
@@ -358,6 +549,8 @@ function printSummary(sources) {
 async function main() {
   const dryRun = process.argv.includes('--dry-run') || !process.argv.includes('--apply');
   const retain = process.argv.includes('--retain-hindsight');
+  const indexMilvus = process.argv.includes('--index-milvus');
+  const reindexMilvus = process.argv.includes('--reindex-milvus');
   const sources = scanSources();
   printSummary(sources);
   if (dryRun) return;
@@ -366,9 +559,25 @@ async function main() {
     connectionString: process.env.MEMORY_DATABASE_URL || 'postgresql://openclaw_memory:openclaw_memory_dev_password@localhost:55432/openclaw_memory'
   });
   try {
-    const runId = await writeManifest(pool, sources, retain ? 'apply-retain-hindsight' : 'apply');
+    const mode = ['apply', indexMilvus && 'index-milvus', retain && 'retain-hindsight'].filter(Boolean).join('+');
+    const runId = await writeManifest(pool, sources, mode);
+    if (indexMilvus) {
+      if (reindexMilvus) {
+        await pool.query(
+          `UPDATE memory_outbox
+           SET status = 'pending', last_error = null, updated_at = now()
+           WHERE target = 'milvus'`
+        );
+      }
+      const indexed = await indexInMilvus(pool, sources);
+      await pool.query(
+        `UPDATE memory_ingest_runs SET indexed_milvus_count = $2 WHERE id = $1`,
+        [runId, indexed]
+      );
+      console.log(`Indexed ${indexed} source spans in Milvus.`);
+    }
     if (retain) {
-      const retained = await retainInHindsight(sources);
+      const retained = await retainInHindsight(pool, sources);
       await pool.query(
         `UPDATE memory_ingest_runs SET retained_hindsight_count = $2 WHERE id = $1`,
         [runId, retained]

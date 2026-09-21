@@ -13,6 +13,18 @@ rebuildable stores.
 - `milvus`: semantic retrieval over raw source chunks.
 - `tei`: local embedding service for Milvus chunk embeddings.
 
+Hindsight defaults to the local Ollama server via `host.docker.internal` so the
+stack can boot without committing or storing an OpenAI key. Set
+`HINDSIGHT_API_LLM_PROVIDER=openai` and `HINDSIGHT_API_LLM_API_KEY` only in your
+local `.env` if you want hosted extraction.
+
+Hindsight uses the stack's TEI service for embeddings. Keeping embeddings out of
+the Hindsight API process avoids the local ONNX startup memory spike.
+
+Milvus indexing defaults to the host's native Ollama `nomic-embed-text` model.
+That keeps the chunk index fast on Apple Silicon while preserving TEI for
+Hindsight's API-internal embeddings.
+
 ## First Run
 
 ```bash
@@ -32,7 +44,25 @@ When dry-run looks sane:
 
 ```bash
 npm run ingest
+npm run index-milvus
 npm run retain
+```
+
+Or run both derived-store steps together:
+
+```bash
+npm run bootstrap
+```
+
+`ingest` writes only the Postgres manifest/outbox. `index-milvus` embeds each
+pending span and upserts it into `MILVUS_COLLECTION`, keeping the source
+path, line range, hash, and parser recipe in every row. `retain` sends one
+coherent document per source file to Hindsight with `update_mode=replace`.
+
+When changing Milvus embedding model or collection, use:
+
+```bash
+npm run reindex-milvus
 ```
 
 ## Rollback
@@ -51,8 +81,8 @@ canonical.
 Versioned identifiers prevent destructive replacement during major changes:
 
 - Hindsight bank: `openclaw-v1`
-- Milvus collection: `openclaw_chunks_v1`
-- Chunk recipe: `file-span-v1/plain-v1/e5-small`
+- Milvus collection: `openclaw_chunks_nomic_v1`
+- Chunk recipe: `file-span-v1/plain-v1/nomic-embed-text`
 
 ## Docling
 

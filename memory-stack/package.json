@@ -5,11 +5,14 @@
   "scripts": {
     "dry-run": "node bin/memory-ingest.js --dry-run",
     "ingest": "node bin/memory-ingest.js --apply",
-    "retain": "node bin/memory-ingest.js --apply --retain-hindsight"
+    "index-milvus": "node bin/memory-ingest.js --apply --index-milvus",
+    "reindex-milvus": "node bin/memory-ingest.js --apply --index-milvus --reindex-milvus",
+    "retain": "node bin/memory-ingest.js --apply --retain-hindsight",
+    "bootstrap": "node bin/memory-ingest.js --apply --index-milvus --retain-hindsight"
   },
   "dependencies": {
+    "@zilliz/milvus2-sdk-node": "^2.5.12",
     "dotenv": "^17.2.3",
     "pg": "^8.17.2"
   }
 }
-
