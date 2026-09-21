@@ -1,0 +1,329 @@
+/*
+ * ------------------------------------------------------------
+ * IMPORTANT: The contents of this file are auto-generated.
+ *
+ * This file may be updated by the Shopify admin theme editor
+ * or related systems. Please exercise caution as any changes
+ * made to this file may be overwritten.
+ * ------------------------------------------------------------
+ */
+{
+  "sections": {
+    "rich_text_6q6xRE": {
+      "type": "rich-text",
+      "blocks": {
+        "heading_3jETLt": {
+          "type": "heading",
+          "settings": {
+            "heading": "<strong>Precision-Engineered Protection for Modern Credentials</strong>",
+            "heading_size": "h2"
+          }
+        },
+        "text_MTCkPa": {
+          "type": "text",
+          "settings": {
+            "text": "<p>At IDGemz, we design badge holders that meet the modern security landscape. From government agencies to corporate campuses, our holders keep IDs and MFA tokens protected, accessible, and always in the right place. </p>"
+          }
+        }
+      },
+      "block_order": [
+        "heading_3jETLt",
+        "text_MTCkPa"
+      ],
+      "name": "t:sections.rich-text.presets.name",
+      "settings": {
+        "desktop_content_position": "center",
+        "content_alignment": "center",
+        "color_scheme": "",
+        "full_width": true,
+        "padding_top": 40,
+        "padding_bottom": 52
+      }
+    },
+    "featured_collection": {
+      "type": "featured-collection",
+      "settings": {
+        "title": "Our Most Popular Holders",
+        "heading_size": "h1",
+        "description": "",
+        "show_description": true,
+        "description_style": "body",
+        "collection": "badge-holders",
+        "products_to_show": 4,
+        "columns_desktop": 4,
+        "full_width": false,
+        "show_view_all": true,
+        "view_all_style": "solid",
+        "enable_desktop_slider": false,
+        "color_scheme": "scheme-1",
+        "image_ratio": "square",
+        "image_shape": "default",
+        "show_secondary_image": true,
+        "show_vendor": false,
+        "show_rating": true,
+        "quick_add": "standard",
+        "columns_mobile": "2",
+        "swipe_on_mobile": true,
+        "padding_top": 0,
+        "padding_bottom": 36
+      }
+    },
+    "17742036786e2d5d1b": {
+      "type": "_blocks",
+      "blocks": {
+        "ai_gen_block_c3ad03a_NFPXnE": {
+          "type": "ai_gen_block_c3ad03a",
+          "settings": {
+            "collection": "",
+            "heading": "Featured collection",
+            "products_to_show": 4,
+            "show_view_all": true,
+            "button_label": "View all",
+            "columns_desktop": 4,
+            "columns_tablet": 3,
+            "columns_mobile": "2",
+            "padding_top": 36,
+            "padding_bottom": 36,
+            "heading_color": "#121212",
+            "product_title_color": "#121212",
+            "product_price_color": "#121212",
+            "button_background": "#121212",
+            "button_hover_background": "#b90000",
+            "button_text_color": "#ffffff",
+            "heading_size": 32
+          },
+          "blocks": {}
+        }
+      },
+      "block_order": [
+        "ai_gen_block_c3ad03a_NFPXnE"
+      ],
+      "disabled": true,
+      "settings": {}
+    },
+    "slideshow_XDrXMX": {
+      "type": "slideshow",
+      "blocks": {
+        "slide_QAzFwb": {
+          "type": "slide",
+          "settings": {
+            "image": "shopify://shop_images/FlexibleDurable.jpg",
+            "heading": "",
+            "heading_size": "h1",
+            "subheading": "",
+            "button_label": "",
+            "link": "",
+            "button_style_secondary": false,
+            "box_align": "middle-center",
+            "show_text_box": false,
+            "text_alignment": "center",
+            "image_overlay_opacity": 0,
+            "color_scheme": "",
+            "text_alignment_mobile": "center"
+          }
+        },
+        "slide_RBt89H": {
+          "type": "slide",
+          "settings": {
+            "image": "shopify://shop_images/Custom_Badge_Holders.jpg",
+            "heading": "",
+            "heading_size": "h1",
+            "subheading": "",
+            "button_label": "",
+            "link": "",
+            "button_style_secondary": false,
+            "box_align": "middle-center",
+            "show_text_box": false,
+            "text_alignment": "center",
+            "image_overlay_opacity": 0,
+            "color_scheme": "",
+            "text_alignment_mobile": "center"
+          }
+        },
+        "slide_ddWxdW": {
+          "type": "slide",
+          "settings": {
+            "image": "shopify://shop_images/StopTheClacking.jpg",
+            "heading": "",
+            "heading_size": "h1",
+            "subheading": "",
+            "button_label": "",
+            "link": "",
+            "button_style_secondary": false,
+            "box_align": "middle-center",
+            "show_text_box": false,
+            "text_alignment": "center",
+            "image_overlay_opacity": 0,
+            "color_scheme": "",
+            "text_alignment_mobile": "center"
+          }
+        }
+      },
+      "block_order": [
+        "slide_QAzFwb",
+        "slide_RBt89H",
+        "slide_ddWxdW"
+      ],
+      "name": "t:sections.slideshow.presets.name",
+      "settings": {
+        "layout": "grid",
+        "slide_height": "adapt_image",
+        "slider_visual": "counter",
+        "auto_rotate": true,
+        "change_slides_speed": 5,
+        "image_behavior": "none",
+        "show_text_below": true,
+        "accessibility_info": "Slideshow about the IDGemz brand"
+      }
+    },
+    "video_YhQmR4": {
+      "type": "video",
+      "name": "t:sections.video.presets.name",
+      "settings": {
+        "heading": "",
+        "heading_size": "h2",
+        "enable_video_looping": true,
+        "video": "shopify://files/videos/Sequence 1 - 35sec 3840x2160.mp4",
+        "video_url": "https://www.youtube.com/watch?v=_9VUPq3SxOc",
+        "cover_image": "shopify://shop_images/Inserting_SRA_Token.png",
+        "description": "A video introducing IDGemz badge holders.",
+        "full_width": false,
+        "color_scheme": "",
+        "padding_top": 36,
+        "padding_bottom": 36
+      }
+    },
+    "1763389774f423238f": {
+      "type": "apps",
+      "blocks": {
+        "judge_me_reviews_featured_carousel_qcLxTd": {
+          "type": "shopify://apps/judge-me-reviews/blocks/featured_carousel/61ccd3b1-a9f2-4160-9fe9-4fec8413e5d8",
+          "settings": {
+            "maxwidth": 1080
+          }
+        }
+      },
+      "block_order": [
+        "judge_me_reviews_featured_carousel_qcLxTd"
+      ],
+      "settings": {
+        "include_margins": true
+      }
+    },
+    "image_with_text_ebLr6F": {
+      "type": "image-with-text",
+      "blocks": {
+        "heading_Ne69mh": {
+          "type": "heading",
+          "settings": {
+            "heading": "Durable Security for Modern Credentials",
+            "heading_size": "h1"
+          }
+        },
+        "text_WfU33H": {
+          "type": "text",
+          "settings": {
+            "text": "<p><br/>At IDGemz, we create badge holders built for today’s security-driven environments, keeping IDs, access cards, and MFA tokens safe from damage and unauthorized handling. Each holder ensures credentials remain visible, accessible, and consistently positioned. We use rugged materials that withstand daily wear while maintaining long-term reliability. Precision craftsmanship guides every detail, supporting accuracy, fit, and dependable performance. With IDGemz, organizations receive solutions that strengthen both security and usability.<br/><br/></p>",
+            "text_style": "body"
+          }
+        },
+        "button_KArpe6": {
+          "type": "button",
+          "settings": {
+            "button_label": "Shop Now",
+            "button_link": "shopify://collections",
+            "button_style_secondary": false
+          }
+        }
+      },
+      "block_order": [
+        "heading_Ne69mh",
+        "text_WfU33H",
+        "button_KArpe6"
+      ],
+      "disabled": true,
+      "name": "t:sections.image-with-text.presets.name",
+      "settings": {
+        "image": "shopify://shop_images/FinallyABadgeHolder.jpg",
+        "height": "adapt",
+        "desktop_image_width": "medium",
+        "layout": "image_first",
+        "desktop_content_position": "top",
+        "desktop_content_alignment": "left",
+        "content_layout": "no-overlap",
+        "section_color_scheme": "",
+        "color_scheme": "",
+        "image_behavior": "none",
+        "mobile_content_alignment": "left",
+        "padding_top": 36,
+        "padding_bottom": 36
+      }
+    },
+    "image_with_text_R7jxxG": {
+      "type": "image-with-text",
+      "blocks": {
+        "heading_pMaDda": {
+          "type": "heading",
+          "settings": {
+            "heading": "Reliable Holders for Everyday Use",
+            "heading_size": "h1"
+          }
+        },
+        "text_UtQJXk": {
+          "type": "text",
+          "settings": {
+            "text": "<p><br/>IDGemz badge holders support operations across government facilities, corporate campuses, and secure industries by protecting sensitive credentials without interrupting workflow. Our custom solutions combine durability with ergonomic ease, fitting seamlessly into established security systems. Every product is designed to enhance reliability through reinforced structures and practical attachment options.<br/></p>",
+            "text_style": "body"
+          }
+        },
+        "button_DDWnLd": {
+          "type": "button",
+          "settings": {
+            "button_label": "Shop Now",
+            "button_link": "shopify://collections",
+            "button_style_secondary": false
+          }
+        }
+      },
+      "block_order": [
+        "heading_pMaDda",
+        "text_UtQJXk",
+        "button_DDWnLd"
+      ],
+      "disabled": true,
+      "name": "t:sections.image-with-text.presets.name",
+      "settings": {
+        "image": "shopify://shop_images/SilentStrongSmart.jpg",
+        "height": "adapt",
+        "desktop_image_width": "medium",
+        "layout": "text_first",
+        "desktop_content_position": "top",
+        "desktop_content_alignment": "left",
+        "content_layout": "no-overlap",
+        "section_color_scheme": "scheme-1",
+        "color_scheme": "scheme-1",
+        "image_behavior": "none",
+        "mobile_content_alignment": "left",
+        "padding_top": 36,
+        "padding_bottom": 36
+      }
+    },
+    "1763242286c9f7e1eb": {
+      "type": "apps",
+      "settings": {
+        "include_margins": true
+      }
+    }
+  },
+  "order": [
+    "rich_text_6q6xRE",
+    "featured_collection",
+    "17742036786e2d5d1b",
+    "slideshow_XDrXMX",
+    "video_YhQmR4",
+    "1763389774f423238f",
+    "image_with_text_ebLr6F",
+    "image_with_text_R7jxxG",
+    "1763242286c9f7e1eb"
+  ]
+}
