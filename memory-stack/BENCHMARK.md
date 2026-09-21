@@ -74,3 +74,49 @@ fallback/manual path.
 Near-term tuning target: improve the new plugin's handling of exact distinctive
 phrases such as `Hindsight`, `qwen3`, `TEI`, `OpenAI key`, and `ONNX`, so older
 generic Ollama notes do not outrank the 2026-09-21 stack note.
+
+## Post-Ranker Rerun - 2026-09-21
+
+This rerun was performed after commit `930ab88` (`Improve memory recall ranking
+and reindexing`), which added reciprocal rank fusion, strict lexical retrieval,
+distinctive-term/phrase boosts, nearby duplicate collapse, and a clean Milvus
+reindex path.
+
+To avoid extra OpenAI model spend, the rerun used direct OpenClaw memory tool
+calls from the tool-orchestration sandbox, not `openclaw agent` sessions. It did
+not ask GPT/Codex to answer each query. The built-in memory tool response still
+labels its embedding provider as `openai` with model `nomic-embed-text`; no agent
+completion loop was used for the benchmark itself.
+
+### Method
+
+- Same 10 fixed operational-memory queries.
+- 3 timed rounds per backend, 90 total direct memory-tool calls.
+- Top 5 results requested from each backend.
+- Relevance remained path-level. The scoring set was broadened to count durable
+  canonical summaries such as `MEMORY.md` when they were valid answers; otherwise
+  the old memory-only backend was unfairly penalized for doing what it is meant to
+  do.
+
+### Results
+
+| Backend | Median ms | Mean ms | p95 ms | Max ms | Hit@1 | Hit@3 | Hit@5 | MRR |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Old built-in, memory only | 348 | 354 | 424 | 425 | 0.90 | 1.00 | 1.00 | 0.95 |
+| Old built-in, all corpora | 356 | 368 | 470 | 599 | 0.60 | 0.70 | 0.80 | 0.67 |
+| New Milvus/Postgres recall | 569 | 598 | 689 | 1036 | 1.00 | 1.00 | 1.00 | 1.00 |
+
+### Interpretation
+
+- The tuned `memory_recall` fixed the previous failing query:
+  `Hindsight uses local Ollama qwen3 TEI embeddings no OpenAI key` now returns
+  `memory/2026-09-21.md#L23-L28` at rank 1 in all three rounds.
+- The new path is still slower than built-in memory search, but the latency is
+  stable: median 569 ms, p95 689 ms, max 1036 ms. The earlier 5.6 second outlier
+  did not recur.
+- Built-in memory-only remains the fastest strong fallback. Its only miss at
+  rank 1 was the Hindsight/qwen3/TEI query, where it preferred older generic
+  local-Ollama memory before the new stack note.
+- Built-in all-corpus is still useful for broad recall, but session transcripts
+  continue to outrank durable source files on stack/integration queries. This is
+  the main reason its MRR stayed lower.
