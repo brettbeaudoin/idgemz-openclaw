@@ -193,6 +193,16 @@ async function writeManifest(pool, sources, mode) {
   const runId = run.rows[0].id;
 
   for (const source of sources) {
+    const existingSource = await pool.query(
+      `SELECT id
+       FROM memory_sources
+       WHERE abs_path = $1`,
+      [source.absPath]
+    );
+    if (existingSource.rows[0]?.id) {
+      source.id = existingSource.rows[0].id;
+    }
+
     await pool.query(
       `INSERT INTO memory_sources (
          id, abs_path, rel_path, source_type, content_sha256, size_bytes,
@@ -222,21 +232,20 @@ async function writeManifest(pool, sources, mode) {
     );
 
     for (const span of source.spans) {
-      await pool.query(
+      const savedSpan = await pool.query(
         `INSERT INTO memory_spans (
            id, source_id, span_index, start_line, end_line, text_sha256,
            text, chunk_recipe, metadata, updated_at
          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now())
-         ON CONFLICT (id) DO UPDATE SET
-           source_id = excluded.source_id,
-           span_index = excluded.span_index,
+         ON CONFLICT (source_id, span_index) DO UPDATE SET
            start_line = excluded.start_line,
            end_line = excluded.end_line,
            text_sha256 = excluded.text_sha256,
            text = excluded.text,
            chunk_recipe = excluded.chunk_recipe,
            metadata = excluded.metadata,
-           updated_at = now()`,
+           updated_at = now()
+         RETURNING id`,
         [
           span.id,
           source.id,
@@ -253,6 +262,7 @@ async function writeManifest(pool, sources, mode) {
           }
         ]
       );
+      span.id = savedSpan.rows[0].id;
 
       for (const target of ['hindsight', 'milvus']) {
         await pool.query(
@@ -448,6 +458,25 @@ async function ensureMilvusCollection(client) {
   return collectionName;
 }
 
+async function dropMilvusCollection() {
+  const client = new MilvusClient({
+    address: process.env.MILVUS_ADDRESS || 'localhost:19531',
+    token: process.env.MILVUS_TOKEN || undefined
+  });
+  try {
+    await client.connectPromise;
+    const collectionName = process.env.MILVUS_COLLECTION || 'openclaw_chunks_v1';
+    const has = await client.hasCollection({ collection_name: collectionName });
+    assertOk(has, 'Milvus hasCollection');
+    if (has.value) {
+      assertOk(await client.dropCollection({ collection_name: collectionName }), 'Milvus dropCollection');
+      console.log(`Dropped Milvus collection ${collectionName} for clean reindex.`);
+    }
+  } finally {
+    await client.closeConnection();
+  }
+}
+
 function allSpans(sources) {
   return sources.flatMap((source) => source.spans.map((span) => ({
     ...span,
@@ -563,6 +592,7 @@ async function main() {
     const runId = await writeManifest(pool, sources, mode);
     if (indexMilvus) {
       if (reindexMilvus) {
+        await dropMilvusCollection();
         await pool.query(
           `UPDATE memory_outbox
            SET status = 'pending', last_error = null, updated_at = now()

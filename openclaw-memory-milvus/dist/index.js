@@ -11,6 +11,19 @@ const DEFAULT_MILVUS_ADDRESS = "localhost:19531";
 const DEFAULT_MILVUS_COLLECTION = "openclaw_chunks_nomic_v1";
 const DEFAULT_OLLAMA_EMBEDDING_ENDPOINT = "http://localhost:11434/api/embed";
 const DEFAULT_OLLAMA_EMBEDDING_MODEL = "nomic-embed-text";
+const RRF_K = 60;
+const DUPLICATE_LINE_WINDOW = 2;
+const QUERY_STOP_TERMS = new Set([
+    "a", "an", "are", "as", "at", "be", "by", "do", "does", "for", "from", "had", "has", "have", "how", "in",
+    "into", "is", "it", "no", "not", "of", "on", "or", "that", "the", "this", "to", "use", "used", "uses", "using",
+    "was", "were", "what", "when", "where", "with",
+]);
+const DISTINCTIVE_STOP_TERMS = new Set([
+    ...QUERY_STOP_TERMS,
+    "active", "agent", "all", "always", "api", "call", "calls", "completed", "current", "data", "file", "fix",
+    "key", "local", "memory", "new", "old", "path", "plugin", "query", "recall", "report", "results", "search",
+    "source", "stack", "tool", "uses",
+]);
 function parseEnvFile(envPath) {
     if (!fs.existsSync(envPath))
         return {};
@@ -60,14 +73,32 @@ function normalizePath(absPath, relPath) {
         return "";
     return path.relative("/Users/bbeaudoin/clawd", absPath);
 }
-function buildLexicalTsQuery(query) {
-    const stop = new Set([
-        "the", "and", "for", "with", "from", "that", "this", "what", "where", "when", "into", "using", "use",
-    ]);
-    const terms = [...new Set(query.toLowerCase().match(/[a-z0-9][a-z0-9_-]{1,}/g) ?? [])]
-        .filter((term) => !stop.has(term))
+function normalizeSearchText(text) {
+    return text.toLowerCase().replace(/[^a-z0-9_-]+/g, " ").replace(/\s+/g, " ").trim();
+}
+export function tokenizeQuery(query) {
+    return [...new Set(query.toLowerCase().match(/[a-z0-9][a-z0-9_-]{1,}/g) ?? [])]
         .map((term) => term.replace(/'/g, ""));
-    return terms.length > 0 ? terms.map((term) => `${term}:*`).join(" | ") : "memory:*";
+}
+function buildLexicalTsQuery(query, mode) {
+    const terms = tokenizeQuery(query).filter((term) => !QUERY_STOP_TERMS.has(term));
+    const operator = mode === "strict" ? " & " : " | ";
+    return terms.length > 0 ? terms.map((term) => `${term}:*`).join(operator) : "memory:*";
+}
+function distinctiveTerms(query) {
+    return tokenizeQuery(query).filter((term) => !DISTINCTIVE_STOP_TERMS.has(term) && (term.length >= 3 || /\d/.test(term)));
+}
+function queryPhrases(query) {
+    const terms = tokenizeQuery(query).filter((term) => !QUERY_STOP_TERMS.has(term));
+    const phrases = new Set();
+    for (const size of [3, 2]) {
+        for (let index = 0; index <= terms.length - size; index += 1) {
+            const phrase = terms.slice(index, index + size).join(" ");
+            if (phrase.length >= 8)
+                phrases.add(phrase);
+        }
+    }
+    return [...phrases];
 }
 async function embedQuery(settings, query) {
     const response = await fetch(settings.ollamaEmbeddingEndpoint, {
@@ -123,10 +154,10 @@ async function searchMilvus(settings, query, limit) {
         await client.closeConnection();
     }
 }
-async function searchPostgres(settings, query, limit) {
+async function searchPostgres(settings, query, limit, mode) {
     const pool = new Pool({ connectionString: settings.databaseUrl });
     try {
-        const lexicalQuery = buildLexicalTsQuery(query);
+        const lexicalQuery = buildLexicalTsQuery(query, mode);
         const response = await pool.query(`WITH q AS (SELECT to_tsquery('simple', $1) AS query)
        SELECT
          sp.id,
@@ -161,31 +192,89 @@ async function searchPostgres(settings, query, limit) {
         await pool.end();
     }
 }
-function mergeHits(vectorHits, textHits, limit) {
+function reciprocalRank(rank, weight) {
+    return weight / (RRF_K + rank);
+}
+function sourceQualityBoost(hit) {
+    if (hit.relPath === "CURRENT.md")
+        return 0.05;
+    if (hit.relPath === "MEMORY.md")
+        return 0.03;
+    if (/^memory\/\d{4}-\d{2}-\d{2}\.md$/.test(hit.relPath))
+        return 0.04;
+    return 0;
+}
+function metaResultPenalty(query, hit) {
+    const normalizedQuery = normalizeSearchText(query);
+    if (/\b(benchmark|test|query|ranking|ranker|evaluation|eval)\b/.test(normalizedQuery))
+        return 0;
+    const normalizedHit = normalizeSearchText(hit.text);
+    return /\b(benchmark|query set|missed the|tuning target|hit@|mrr)\b/.test(normalizedHit) ? -0.25 : 0;
+}
+function lexicalBoost(hit, terms, phrases) {
+    const haystack = normalizeSearchText(`${hit.relPath} ${hit.text}`);
+    const matchedTerms = terms.filter((term) => haystack.includes(term)).length;
+    const coverage = terms.length > 0 ? matchedTerms / terms.length : 0;
+    const matchedPhrases = phrases.filter((phrase) => haystack.includes(phrase)).length;
+    const phraseCoverage = phrases.length > 0 ? matchedPhrases / phrases.length : 0;
+    const allDistinctiveTermsMatched = terms.length > 0 && matchedTerms === terms.length;
+    return (coverage * 0.6) + (phraseCoverage * 0.25) + (allDistinctiveTermsMatched ? 0.15 : 0);
+}
+function collapseNearbyDuplicates(hits, limit) {
+    const kept = [];
+    for (const hit of hits) {
+        const duplicate = kept.some((existing) => existing.relPath === hit.relPath
+            && hit.startLine <= existing.endLine + DUPLICATE_LINE_WINDOW
+            && hit.endLine >= existing.startLine - DUPLICATE_LINE_WINDOW);
+        if (!duplicate)
+            kept.push(hit);
+        if (kept.length >= limit)
+            break;
+    }
+    return kept;
+}
+export function mergeHits(vectorHits, looseTextHits, strictTextHits, query, limit) {
     const byId = new Map();
     const maxVector = Math.max(1, ...vectorHits.map((hit) => hit.vectorScore));
-    const maxText = Math.max(1, ...textHits.map((hit) => hit.textScore));
-    for (const hit of vectorHits)
-        byId.set(hit.id, { ...hit, vectorScore: hit.vectorScore / maxVector });
-    for (const hit of textHits) {
+    const maxText = Math.max(1, ...looseTextHits.map((hit) => hit.textScore), ...strictTextHits.map((hit) => hit.textScore));
+    const rrfScores = new Map();
+    const terms = distinctiveTerms(query);
+    const phrases = queryPhrases(query);
+    const addHit = (hit, rank, weight, normalizedScores) => {
         const existing = byId.get(hit.id);
         if (existing) {
-            existing.textScore = hit.textScore / maxText;
+            existing.vectorScore = Math.max(existing.vectorScore, normalizedScores.vectorScore ?? 0);
+            existing.textScore = Math.max(existing.textScore, normalizedScores.textScore ?? 0);
             existing.backend = "hybrid";
         }
         else {
-            byId.set(hit.id, { ...hit, textScore: hit.textScore / maxText });
+            byId.set(hit.id, { ...hit, ...normalizedScores });
         }
+        rrfScores.set(hit.id, (rrfScores.get(hit.id) ?? 0) + reciprocalRank(rank, weight));
+    };
+    for (const [index, hit] of vectorHits.entries()) {
+        addHit(hit, index + 1, 0.8, { vectorScore: hit.vectorScore / maxVector, textScore: 0 });
     }
-    return [...byId.values()]
+    for (const [index, hit] of looseTextHits.entries()) {
+        addHit(hit, index + 1, 1.0, { vectorScore: 0, textScore: hit.textScore / maxText });
+    }
+    for (const [index, hit] of strictTextHits.entries()) {
+        addHit(hit, index + 1, 1.6, { vectorScore: 0, textScore: hit.textScore / maxText });
+    }
+    const ranked = [...byId.values()]
         .map((hit) => ({
         ...hit,
-        score: hit.textScore > 0
-            ? Math.max(hit.vectorScore, 0) * 0.25 + Math.max(hit.textScore, 0) * 0.75
-            : Math.max(hit.vectorScore, 0) * 0.25,
+        score: (rrfScores.get(hit.id) ?? 0)
+            + lexicalBoost(hit, terms, phrases)
+            + sourceQualityBoost(hit)
+            + metaResultPenalty(query, hit),
     }))
-        .sort((a, b) => b.score - a.score || a.relPath.localeCompare(b.relPath) || a.startLine - b.startLine)
-        .slice(0, limit);
+        .sort((a, b) => b.score - a.score
+        || b.textScore - a.textScore
+        || b.vectorScore - a.vectorScore
+        || a.relPath.localeCompare(b.relPath)
+        || a.startLine - b.startLine);
+    return collapseNearbyDuplicates(ranked, limit);
 }
 function formatRecall(query, hits, settings) {
     if (hits.length === 0) {
@@ -263,11 +352,13 @@ export default defineToolPlugin({
             execute: async ({ query, limit }, config = {}) => {
                 const settings = resolveSettings(config);
                 const requestedLimit = Math.max(1, Math.min(20, Number(limit ?? 8)));
-                const [vectorHits, textHits] = await Promise.all([
-                    searchMilvus(settings, query, Math.max(requestedLimit * 3, 12)),
-                    searchPostgres(settings, query, Math.max(requestedLimit * 3, 12)),
+                const candidateLimit = Math.max(requestedLimit * 6, 30);
+                const [vectorHits, looseTextHits, strictTextHits] = await Promise.all([
+                    searchMilvus(settings, query, candidateLimit),
+                    searchPostgres(settings, query, candidateLimit, "loose"),
+                    searchPostgres(settings, query, candidateLimit, "strict").catch(() => []),
                 ]);
-                return formatRecall(query, mergeHits(vectorHits, textHits, requestedLimit), settings);
+                return formatRecall(query, mergeHits(vectorHits, looseTextHits, strictTextHits, query, requestedLimit), settings);
             },
         }),
     ],
