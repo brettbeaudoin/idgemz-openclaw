@@ -1,0 +1,157 @@
+name: openclaw-memory
+
+services:
+  memory-postgres:
+    image: postgres:16-alpine
+    container_name: openclaw-memory-postgres
+    restart: unless-stopped
+    ports:
+      - "${MEMORY_POSTGRES_PORT:-55432}:5432"
+    environment:
+      POSTGRES_DB: ${MEMORY_POSTGRES_DB:-openclaw_memory}
+      POSTGRES_USER: ${MEMORY_POSTGRES_USER:-openclaw_memory}
+      POSTGRES_PASSWORD: ${MEMORY_POSTGRES_PASSWORD:-openclaw_memory_dev_password}
+    volumes:
+      - memory-postgres-data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [memory-net]
+
+  hindsight-db:
+    image: pgvector/pgvector:pg16
+    container_name: openclaw-hindsight-db
+    restart: unless-stopped
+    ports:
+      - "${HINDSIGHT_POSTGRES_PORT:-55434}:5432"
+    environment:
+      POSTGRES_DB: ${HINDSIGHT_POSTGRES_DB:-hindsight}
+      POSTGRES_USER: ${HINDSIGHT_POSTGRES_USER:-hindsight}
+      POSTGRES_PASSWORD: ${HINDSIGHT_POSTGRES_PASSWORD:-hindsight_dev_password}
+    volumes:
+      - hindsight-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [memory-net]
+
+  hindsight:
+    image: ${HINDSIGHT_IMAGE:-ghcr.io/vectorize-io/hindsight:latest}
+    container_name: openclaw-hindsight
+    restart: unless-stopped
+    depends_on:
+      hindsight-db:
+        condition: service_healthy
+    ports:
+      - "${HINDSIGHT_API_PORT:-8888}:8888"
+      - "${HINDSIGHT_DASHBOARD_PORT:-9999}:9999"
+    environment:
+      HINDSIGHT_API_DATABASE_URL: postgresql://${HINDSIGHT_POSTGRES_USER:-hindsight}:${HINDSIGHT_POSTGRES_PASSWORD:-hindsight_dev_password}@hindsight-db:5432/${HINDSIGHT_POSTGRES_DB:-hindsight}
+      HINDSIGHT_API_HOST: "0.0.0.0"
+      HINDSIGHT_API_PORT: "8888"
+      HINDSIGHT_API_WORKER_ID: ${HINDSIGHT_API_WORKER_ID:-openclaw-hindsight-local}
+      HINDSIGHT_API_LOG_LEVEL: ${HINDSIGHT_API_LOG_LEVEL:-info}
+      HINDSIGHT_API_LLM_PROVIDER: ${HINDSIGHT_API_LLM_PROVIDER:-openai}
+      HINDSIGHT_API_LLM_MODEL: ${HINDSIGHT_API_LLM_MODEL:-}
+      HINDSIGHT_API_LLM_BASE_URL: ${HINDSIGHT_API_LLM_BASE_URL:-}
+      HINDSIGHT_API_LLM_API_KEY: ${HINDSIGHT_API_LLM_API_KEY:-}
+      HINDSIGHT_API_LLM_TRACE_ENABLED: ${HINDSIGHT_API_LLM_TRACE_ENABLED:-false}
+      HINDSIGHT_API_RETAIN_EXTRACTION_MODE: ${HINDSIGHT_API_RETAIN_EXTRACTION_MODE:-concise}
+      HINDSIGHT_API_FAIL_ON_EXTRACTION_ERRORS: ${HINDSIGHT_API_FAIL_ON_EXTRACTION_ERRORS:-true}
+      HINDSIGHT_API_ENABLE_OBSERVATIONS: ${HINDSIGHT_API_ENABLE_OBSERVATIONS:-true}
+      HINDSIGHT_API_ENABLE_AUTO_CONSOLIDATION: ${HINDSIGHT_API_ENABLE_AUTO_CONSOLIDATION:-true}
+      HINDSIGHT_API_RETAIN_MISSION: "${HINDSIGHT_API_RETAIN_MISSION:-Extract durable facts, decisions, preferences, incidents, lessons, project state, and recurring patterns that would help Dangerboat assist Brett later. Ignore filler, tool noise, and transient status unless it changes future behavior.}"
+      HINDSIGHT_API_OBSERVATIONS_MISSION: "${HINDSIGHT_API_OBSERVATIONS_MISSION:-Synthesize durable evidence-grounded beliefs, preferences, operating patterns, project history, and changes over time. Preserve uncertainty and contradictions.}"
+      HINDSIGHT_API_EMBEDDINGS_PROVIDER: ${HINDSIGHT_API_EMBEDDINGS_PROVIDER:-onnx}
+      HINDSIGHT_API_EMBEDDINGS_ONNX_MODEL_ID: ${HINDSIGHT_API_EMBEDDINGS_ONNX_MODEL_ID:-intfloat/multilingual-e5-small}
+      HINDSIGHT_API_EMBEDDINGS_ONNX_FILE: ${HINDSIGHT_API_EMBEDDINGS_ONNX_FILE:-onnx/model.onnx}
+      HINDSIGHT_API_EMBEDDINGS_ONNX_DIMENSIONS: ${HINDSIGHT_API_EMBEDDINGS_ONNX_DIMENSIONS:-384}
+      HINDSIGHT_API_EMBEDDINGS_ONNX_MAX_TOKENS: ${HINDSIGHT_API_EMBEDDINGS_ONNX_MAX_TOKENS:-512}
+      HINDSIGHT_API_EMBEDDINGS_ONNX_POOLING: ${HINDSIGHT_API_EMBEDDINGS_ONNX_POOLING:-mean}
+      HINDSIGHT_API_EMBEDDINGS_ONNX_NORMALIZE: ${HINDSIGHT_API_EMBEDDINGS_ONNX_NORMALIZE:-true}
+      HINDSIGHT_API_EMBEDDINGS_ONNX_QUERY_PREFIX: "${HINDSIGHT_API_EMBEDDINGS_ONNX_QUERY_PREFIX:-query: }"
+      HINDSIGHT_API_EMBEDDINGS_ONNX_PASSAGE_PREFIX: "${HINDSIGHT_API_EMBEDDINGS_ONNX_PASSAGE_PREFIX:-passage: }"
+      HINDSIGHT_API_RERANKER_PROVIDER: ${HINDSIGHT_API_RERANKER_PROVIDER:-rrf}
+    volumes:
+      - hindsight-models:/app/models
+    networks: [memory-net]
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.18
+    container_name: openclaw-milvus-etcd
+    restart: unless-stopped
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    command: >
+      etcd
+      -advertise-client-urls=http://127.0.0.1:2379
+      -listen-client-urls=http://0.0.0.0:2379
+      --data-dir=/etcd
+    volumes:
+      - milvus-etcd-data:/etcd
+    networks: [memory-net]
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: openclaw-milvus-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MILVUS_MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MILVUS_MINIO_ROOT_PASSWORD:-minioadmin}
+    command: minio server /minio_data
+    volumes:
+      - milvus-minio-data:/minio_data
+    networks: [memory-net]
+
+  milvus:
+    image: milvusdb/milvus:v2.5.12
+    container_name: openclaw-milvus
+    restart: unless-stopped
+    command: ["milvus", "run", "standalone"]
+    depends_on:
+      - etcd
+      - minio
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    ports:
+      - "${MILVUS_PORT:-19531}:19530"
+      - "${MILVUS_METRICS_PORT:-9091}:9091"
+    volumes:
+      - milvus-data:/var/lib/milvus
+    networks: [memory-net]
+
+  tei:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-latest
+    container_name: openclaw-tei
+    restart: unless-stopped
+    command:
+      - "--model-id"
+      - "${EMBEDDING_MODEL:-intfloat/multilingual-e5-small}"
+    ports:
+      - "${TEI_PORT:-8081}:80"
+    volumes:
+      - tei-data:/data
+    networks: [memory-net]
+
+networks:
+  memory-net:
+    name: ${OPENCLAW_MEMORY_NETWORK:-openclaw-memory-net}
+
+volumes:
+  memory-postgres-data:
+  hindsight-postgres-data:
+  hindsight-models:
+  milvus-etcd-data:
+  milvus-minio-data:
+  milvus-data:
+  tei-data:
+
