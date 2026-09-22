@@ -27,6 +27,10 @@ unavailable, recall falls back to Postgres full-text.
 Hindsight keeps TEI as its embedding sidecar because the embedded ONNX path was
 still killed by the same local memory spike observed during bootstrap. TEI is
 used only through Hindsight; the Postgres fallback path does not depend on it.
+Local Hindsight retain uses Brett's Ollama server, so the compose defaults keep
+LLM concurrency at 1, retain LLM concurrency at 1, and auto-consolidation off.
+This prevents background retain from stampeding Ollama and timing out before
+marker-bearing documents are processed.
 
 ## First Run
 

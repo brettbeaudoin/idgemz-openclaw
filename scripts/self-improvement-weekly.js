@@ -212,6 +212,32 @@ function checkMemoryStackHealthOnly() {
   if ((failed || 0) === 0 && (stalePending || 0) === 0 && (staleQueued || 0) === 0) {
     ok.push('Memory outbox has no failed, stale pending, or stale queued rows');
   }
+
+  const hindsightOps = run('hindsight async operations check', 'docker', [
+    'compose', '--env-file', '.env', 'exec', '-T',
+    'hindsight-db',
+    'psql', '-U', 'hindsight', '-d', 'hindsight',
+    '-At',
+    '-c',
+    [
+      "select coalesce(sum(case when status = 'failed' and operation_type in ('retain','batch_retain') and updated_at > now() - interval '24 hours' then 1 else 0 end),0) from async_operations;",
+      "select coalesce(sum(case when status = 'pending' and operation_type in ('retain','batch_retain') and created_at < now() - interval '6 hours' then 1 else 0 end),0) from async_operations;"
+    ].join(' ')
+  ], { cwd: STACK_DIR, timeout: 60000 });
+  if (!hindsightOps.ok) {
+    needsAttention.push(`Hindsight async operation check failed: ${summarizeOutput(hindsightOps)}`);
+    return;
+  }
+  const [recentFailedRetains, stalePendingRetains] = hindsightOps.stdout.split(/\r?\n/).map((value) => Number(value.trim()));
+  if ((recentFailedRetains || 0) > 0) {
+    needsAttention.push(`Hindsight has ${recentFailedRetains} retain operation failure(s) in the last 24 hours`);
+  }
+  if ((stalePendingRetains || 0) > 0) {
+    needsAttention.push(`Hindsight has ${stalePendingRetains} pending retain operation(s) older than 6 hours`);
+  }
+  if ((recentFailedRetains || 0) === 0 && (stalePendingRetains || 0) === 0) {
+    ok.push('Hindsight async retain queue has no recent failures or stale pending rows');
+  }
 }
 
 function checkRecallPlugin() {

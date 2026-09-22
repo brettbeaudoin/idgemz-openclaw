@@ -86,6 +86,22 @@ describe("openclaw-memory-milvus", () => {
     expect(ids).toEqual([spanId]);
   });
 
+  it("extracts Postgres span ids from Hindsight span_ids_json metadata", () => {
+    const first = "1111111111111111111111111111111111111111";
+    const second = "2222222222222222222222222222222222222222";
+    const ids = extractSpanIdsFromHindsightResponse({
+      results: [{
+        id: "fact-1",
+        text: "User has key priorities including Amazon listing audit",
+        metadata: {
+          span_ids_json: JSON.stringify([first, second]),
+        },
+      }],
+    });
+
+    expect(ids).toEqual([first, second]);
+  });
+
 });
 
 function hit(overrides: Partial<Parameters<typeof mergeHits>[0][number]>): Parameters<typeof mergeHits>[0][number] {

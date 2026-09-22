@@ -137,8 +137,14 @@ async function searchPostgres(settings, query, limit, mode) {
         await pool.end();
     }
 }
-async function fetchPostgresSpansByIds(settings, spanIds, hindsightScores) {
-    const ids = [...new Set(spanIds)].filter(Boolean);
+async function fetchPostgresSpansByIds(settings, candidates) {
+    const byId = new Map();
+    for (const candidate of candidates) {
+        const existing = byId.get(candidate.id);
+        if (!existing || candidate.score > existing.score)
+            byId.set(candidate.id, candidate);
+    }
+    const ids = [...byId.keys()].filter(Boolean);
     if (ids.length === 0)
         return [];
     const pool = new Pool({ connectionString: settings.databaseUrl });
@@ -157,7 +163,8 @@ async function fetchPostgresSpansByIds(settings, spanIds, hindsightScores) {
        ORDER BY array_position($1::text[], sp.id) ASC`, [ids]);
         return response.rows.map((row) => {
             const id = String(row.id);
-            const score = hindsightScores.get(id) ?? 0;
+            const candidate = byId.get(id);
+            const score = (candidate?.score ?? 0) + evidenceOverlapBoost(String(row.text ?? ""), candidate?.evidenceText ?? "");
             return {
                 id,
                 relPath: String(row.rel_path ?? ""),
@@ -171,7 +178,7 @@ async function fetchPostgresSpansByIds(settings, spanIds, hindsightScores) {
                 score,
                 backend: "hindsight",
             };
-        });
+        }).sort((a, b) => b.score - a.score || ids.indexOf(a.id) - ids.indexOf(b.id));
     }
     finally {
         await pool.end();
@@ -183,28 +190,77 @@ function extractSpanIdsFromText(text) {
     SPAN_ID_PATTERN.lastIndex = 0;
     return [...text.matchAll(SPAN_ID_PATTERN)].map((match) => String(match[1] ?? ""));
 }
-export function extractSpanIdsFromHindsightResponse(payload) {
+function validSpanId(value) {
+    if (typeof value !== "string")
+        return undefined;
+    const normalized = value.trim().toLowerCase();
+    return /^[a-f0-9]{40}$/.test(normalized) ? normalized : undefined;
+}
+function extractSpanIdsFromMetadata(metadata) {
     const ids = [];
-    const data = payload;
-    const addFromItem = (item) => {
-        if (!item)
-            return;
-        ids.push(...extractSpanIdsFromText(item.text));
-        ids.push(...extractSpanIdsFromText(item.context));
-        for (const value of Object.values(item.metadata ?? {})) {
-            if (typeof value === "string")
-                ids.push(...extractSpanIdsFromText(value));
+    for (const [key, value] of Object.entries(metadata ?? {})) {
+        if (typeof value === "string") {
+            ids.push(...extractSpanIdsFromText(value));
+            if (/span.*ids.*json/i.test(key)) {
+                try {
+                    const parsed = JSON.parse(value);
+                    if (Array.isArray(parsed))
+                        ids.push(...parsed.map(validSpanId).filter((id) => Boolean(id)));
+                }
+                catch {
+                    // Metadata from older Hindsight rows may be arbitrary strings.
+                }
+            }
         }
-        const chunkText = item.chunk_id ? data.chunks?.[item.chunk_id]?.text : undefined;
-        ids.push(...extractSpanIdsFromText(chunkText));
-    };
-    for (const result of data.results ?? []) {
-        addFromItem(result);
-        for (const sourceFactId of result.source_fact_ids ?? []) {
-            addFromItem(data.source_facts?.[sourceFactId]);
+        else if (Array.isArray(value) && /span.*ids?/i.test(key)) {
+            ids.push(...value.map(validSpanId).filter((id) => Boolean(id)));
         }
     }
-    return [...new Set(ids)];
+    return ids;
+}
+function evidenceOverlapBoost(spanText, evidenceText) {
+    const terms = distinctiveTerms(evidenceText);
+    if (terms.length === 0)
+        return 0;
+    const haystack = normalizeSearchText(spanText);
+    const matched = terms.filter((term) => haystack.includes(term)).length;
+    return Math.min(0.5, (matched / terms.length) * 0.5);
+}
+function extractSpanCandidatesFromHindsightResponse(payload) {
+    const candidates = new Map();
+    const data = payload;
+    const addCandidate = (id, score, evidenceText) => {
+        const existing = candidates.get(id);
+        if (!existing || score > existing.score) {
+            candidates.set(id, { id, score, evidenceText });
+        }
+    };
+    const addIds = (ids, score, evidenceText) => {
+        for (const id of ids.map(validSpanId).filter((value) => Boolean(value))) {
+            addCandidate(id, score, evidenceText);
+        }
+    };
+    const addFromItem = (item, inheritedEvidence = "") => {
+        if (!item)
+            return;
+        const evidenceText = [inheritedEvidence, item.text, item.context].filter(Boolean).join("\n");
+        addIds(extractSpanIdsFromText(item.text), 1, evidenceText);
+        addIds(extractSpanIdsFromText(item.context), 0.9, evidenceText);
+        addIds(extractSpanIdsFromMetadata(item.metadata), 0.7, evidenceText);
+        const chunkText = item.chunk_id ? data.chunks?.[item.chunk_id]?.text : undefined;
+        addIds(extractSpanIdsFromText(chunkText), 0.45, evidenceText);
+    };
+    for (const result of data.results ?? []) {
+        const evidenceText = [result.text, result.context].filter(Boolean).join("\n");
+        addFromItem(result, evidenceText);
+        for (const sourceFactId of result.source_fact_ids ?? []) {
+            addFromItem(data.source_facts?.[sourceFactId], evidenceText);
+        }
+    }
+    return [...candidates.values()].sort((a, b) => b.score - a.score);
+}
+export function extractSpanIdsFromHindsightResponse(payload) {
+    return extractSpanCandidatesFromHindsightResponse(payload).map((candidate) => candidate.id);
 }
 async function searchHindsightSpanIds(settings, query, limit) {
     const controller = new AbortController();
@@ -228,16 +284,13 @@ async function searchHindsightSpanIds(settings, query, limit) {
             }),
         });
         if (!response.ok)
-            return { spanIds: [], scores: new Map(), unavailable: `HTTP ${response.status}` };
+            return { candidates: [], unavailable: `HTTP ${response.status}` };
         const payload = await response.json();
-        const limitedSpanIds = extractSpanIdsFromHindsightResponse(payload).slice(0, limit);
-        const scores = new Map();
-        limitedSpanIds.forEach((id, index) => scores.set(id, Math.max(0.05, 1 - (index * 0.05))));
-        return { spanIds: limitedSpanIds, scores };
+        return { candidates: extractSpanCandidatesFromHindsightResponse(payload).slice(0, limit) };
     }
     catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        return { spanIds: [], scores: new Map(), unavailable: message };
+        return { candidates: [], unavailable: message };
     }
     finally {
         clearTimeout(timeout);
@@ -414,7 +467,7 @@ export default defineToolPlugin({
                     searchPostgres(settings, query, candidateLimit, "loose"),
                     searchPostgres(settings, query, candidateLimit, "strict").catch(() => []),
                 ]);
-                const hindsightHits = await fetchPostgresSpansByIds(settings, hindsightResult.spanIds, hindsightResult.scores).catch(() => []);
+                const hindsightHits = await fetchPostgresSpansByIds(settings, hindsightResult.candidates).catch(() => []);
                 const hindsightStatus = hindsightResult.unavailable
                     ? `unavailable (${hindsightResult.unavailable})`
                     : `ok (${hindsightHits.length} span${hindsightHits.length === 1 ? "" : "s"})`;
