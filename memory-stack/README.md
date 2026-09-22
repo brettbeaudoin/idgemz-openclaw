@@ -3,34 +3,34 @@
 This directory contains the rollback-safe memory stack for Dangerboat/OpenClaw.
 
 Canonical truth remains the source files under `/Users/bbeaudoin/clawd`.
-Postgres is a manifest/index and audit log. Hindsight and Milvus are derived,
-rebuildable stores.
+Postgres is the live manifest/search index and audit log. Hindsight is a
+derived, rebuildable retention/consolidation sidecar.
 
 ## Components
 
 - `memory-postgres`: manifest tables for sources, spans, ingest runs, and outbox.
 - `hindsight`: durable derived memory/observations over coherent documents.
-- `milvus`: semantic retrieval over raw source chunks.
-- `tei`: local embedding service for Milvus chunk embeddings.
+- `tei`: embedding service used only by Hindsight.
 
 Hindsight defaults to the local Ollama server via `host.docker.internal` so the
 stack can boot without committing or storing an OpenAI key. Set
 `HINDSIGHT_API_LLM_PROVIDER=openai` and `HINDSIGHT_API_LLM_API_KEY` only in your
 local `.env` if you want hosted extraction.
 
-Hindsight uses the stack's TEI service for embeddings. Keeping embeddings out of
-the Hindsight API process avoids the local ONNX startup memory spike.
+Live OpenClaw recall reads Postgres full-text results and applies the local
+reranker in the `memory_recall` plugin. It does not require Milvus, TEI, or a
+query embedding service.
 
-Milvus indexing defaults to the host's native Ollama `nomic-embed-text` model.
-That keeps the chunk index fast on Apple Silicon while preserving TEI for
-Hindsight's API-internal embeddings.
+Hindsight keeps TEI as its embedding sidecar because the embedded ONNX path was
+still killed by the same local memory spike observed during bootstrap. TEI is
+not in the live recall path.
 
 ## First Run
 
 ```bash
 cd memory-stack
 cp .env.example .env
-docker compose --env-file .env up -d memory-postgres hindsight-db hindsight milvus tei
+docker compose --env-file .env up -d memory-postgres hindsight-db tei hindsight
 npm install
 npm run dry-run
 ```
@@ -44,7 +44,6 @@ When dry-run looks sane:
 
 ```bash
 npm run ingest
-npm run index-milvus
 npm run retain
 ```
 
@@ -54,30 +53,21 @@ Or run both derived-store steps together:
 npm run bootstrap
 ```
 
-`ingest` writes only the Postgres manifest/outbox. `index-milvus` embeds each
-pending span and upserts it into `MILVUS_COLLECTION`, keeping the source
-path, line range, hash, and parser recipe in every row. `retain` sends one
-coherent document per source file to Hindsight with `update_mode=replace`.
-
-When changing Milvus embedding model or collection, use:
-
-```bash
-npm run reindex-milvus
-```
+`ingest` writes the Postgres manifest/search index and Hindsight outbox.
+`retain` sends one coherent document per source file to Hindsight with
+`update_mode=replace`.
 
 ## Scheduler
 
-Live OpenClaw recall depends on Postgres + Milvus, so the fast refresh runs
-often:
+Live OpenClaw recall depends on Postgres, so the fast refresh runs often:
 
 ```bash
 /Users/bbeaudoin/clawd/idgemz-openclaw/scripts/cron-memory-stack-refresh.sh fast
 ```
 
-The fast mode runs `npm run index-milvus`, which applies the Postgres manifest
-and indexes only pending Milvus spans. The ingest path scans and hashes source
-files every time, but unchanged files only refresh `memory_sources.last_seen_at`;
-they do not rewrite spans or enqueue Milvus/Hindsight work.
+The fast mode runs `npm run ingest`, which scans and hashes source files every
+time. Unchanged files only refresh `memory_sources.last_seen_at`; they do not
+rewrite spans or enqueue Hindsight work.
 
 Hindsight is slower and not in the live recall path, so it runs hourly:
 
@@ -97,7 +87,7 @@ tracked copy.
 
 ## Rollback
 
-Rollback never depends on Hindsight or Milvus because source files remain
+Rollback never depends on Hindsight or Postgres because source files remain
 canonical.
 
 1. Stop the stack:
@@ -111,8 +101,7 @@ canonical.
 Versioned identifiers prevent destructive replacement during major changes:
 
 - Hindsight bank: `openclaw-v1`
-- Milvus collection: `openclaw_chunks_nomic_v1`
-- Chunk recipe: `file-span-v1/plain-v1/nomic-embed-text`
+- Chunk recipe: `file-span-v1/plain-v1/postgres-full-text`
 
 ## Docling
 

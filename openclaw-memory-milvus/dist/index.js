@@ -1,16 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
-import { MetricType, MilvusClient } from "@zilliz/milvus2-sdk-node";
 import pg from "pg";
 import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
 const { Pool } = pg;
 const DEFAULT_ENV_PATH = "/Users/bbeaudoin/clawd/idgemz-openclaw/memory-stack/.env";
 const DEFAULT_DATABASE_URL = "postgresql://localhost:55432/openclaw_memory";
-const DEFAULT_MILVUS_ADDRESS = "localhost:19531";
-const DEFAULT_MILVUS_COLLECTION = "openclaw_chunks_nomic_v1";
-const DEFAULT_OLLAMA_EMBEDDING_ENDPOINT = "http://localhost:11434/api/embed";
-const DEFAULT_OLLAMA_EMBEDDING_MODEL = "nomic-embed-text";
 const RRF_K = 60;
 const DUPLICATE_LINE_WINDOW = 2;
 const QUERY_STOP_TERMS = new Set([
@@ -49,11 +44,6 @@ function resolveSettings(config = {}) {
     return {
         envPath,
         databaseUrl: config.databaseUrl || process.env.MEMORY_DATABASE_URL || fileEnv.MEMORY_DATABASE_URL || DEFAULT_DATABASE_URL,
-        milvusAddress: config.milvusAddress || process.env.MILVUS_ADDRESS || fileEnv.MILVUS_ADDRESS || DEFAULT_MILVUS_ADDRESS,
-        milvusCollection: config.milvusCollection || process.env.MILVUS_COLLECTION || fileEnv.MILVUS_COLLECTION || DEFAULT_MILVUS_COLLECTION,
-        ollamaEmbeddingEndpoint: config.ollamaEmbeddingEndpoint || process.env.OLLAMA_EMBEDDING_ENDPOINT || fileEnv.OLLAMA_EMBEDDING_ENDPOINT || DEFAULT_OLLAMA_EMBEDDING_ENDPOINT,
-        ollamaEmbeddingModel: config.ollamaEmbeddingModel || process.env.OLLAMA_EMBEDDING_MODEL || fileEnv.OLLAMA_EMBEDDING_MODEL || DEFAULT_OLLAMA_EMBEDDING_MODEL,
-        embeddingQueryPrefix: config.embeddingQueryPrefix ?? process.env.EMBEDDING_QUERY_PREFIX ?? fileEnv.EMBEDDING_QUERY_PREFIX ?? "",
     };
 }
 function numberValue(value, fallback = 0) {
@@ -99,60 +89,6 @@ function queryPhrases(query) {
         }
     }
     return [...phrases];
-}
-async function embedQuery(settings, query) {
-    const response = await fetch(settings.ollamaEmbeddingEndpoint, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-            model: settings.ollamaEmbeddingModel,
-            input: [`${settings.embeddingQueryPrefix}${query}`],
-        }),
-    });
-    if (!response.ok) {
-        const body = await response.text();
-        throw new Error(`Ollama embedding request failed: HTTP ${response.status} ${body.slice(0, 500)}`);
-    }
-    const payload = await response.json();
-    const vector = payload.embeddings?.[0];
-    if (!Array.isArray(vector))
-        throw new Error("Ollama embedding response did not include a vector");
-    return vector;
-}
-async function searchMilvus(settings, query, limit) {
-    const vector = await embedQuery(settings, query);
-    const client = new MilvusClient({ address: settings.milvusAddress });
-    try {
-        await client.connectPromise;
-        await client.loadCollectionSync({ collection_name: settings.milvusCollection });
-        const response = await client.search({
-            collection_name: settings.milvusCollection,
-            vector,
-            anns_field: "embedding",
-            limit,
-            metric_type: MetricType.COSINE,
-            output_fields: ["id", "rel_path", "abs_path", "source_type", "start_line", "end_line", "text"],
-        });
-        return (response.results ?? []).map((row) => {
-            const relPath = normalizePath(String(row.abs_path ?? ""), String(row.rel_path ?? ""));
-            return {
-                id: String(row.id ?? `${relPath}:${row.start_line ?? 0}`),
-                relPath,
-                absPath: String(row.abs_path ?? ""),
-                sourceType: String(row.source_type ?? ""),
-                startLine: numberValue(row.start_line),
-                endLine: numberValue(row.end_line),
-                text: String(row.text ?? ""),
-                vectorScore: numberValue(row.score),
-                textScore: 0,
-                score: numberValue(row.score),
-                backend: "milvus",
-            };
-        });
-    }
-    finally {
-        await client.closeConnection();
-    }
 }
 async function searchPostgres(settings, query, limit, mode) {
     const pool = new Pool({ connectionString: settings.databaseUrl });
@@ -279,16 +215,16 @@ export function mergeHits(vectorHits, looseTextHits, strictTextHits, query, limi
 function formatRecall(query, hits, settings) {
     if (hits.length === 0) {
         return {
-            summary: `No Milvus/Postgres memory hits for: ${query}`,
-            backend: "milvus-postgres",
-            collection: settings.milvusCollection,
+            summary: `No Postgres memory hits for: ${query}`,
+            backend: "postgres",
+            collection: "postgres-full-text",
             results: [],
         };
     }
     return {
         summary: [
-            `Milvus/Postgres memory recall for: ${query}`,
-            `Collection: ${settings.milvusCollection}`,
+            `Postgres memory recall for: ${query}`,
+            `Index: ${settings.databaseUrl.replace(/:[^:@/]+@/, ":***@")}`,
             "",
             ...hits.map((hit, index) => [
                 `${index + 1}. ${hit.relPath}:${hit.startLine}`,
@@ -297,8 +233,8 @@ function formatRecall(query, hits, settings) {
                 `Source: ${hit.relPath}#L${hit.startLine}${hit.endLine && hit.endLine !== hit.startLine ? `-L${hit.endLine}` : ""}`,
             ].join("\n")),
         ].join("\n\n"),
-        backend: "milvus-postgres",
-        collection: settings.milvusCollection,
+        backend: "postgres",
+        collection: "postgres-full-text",
         results: hits.map((hit) => ({
             path: hit.relPath,
             startLine: hit.startLine,
@@ -314,21 +250,16 @@ function formatRecall(query, hits, settings) {
 }
 export default defineToolPlugin({
     id: "openclaw-memory-milvus",
-    name: "OpenClaw Memory Milvus",
-    description: "Recall canonical OpenClaw memory chunks from the local Postgres + Milvus memory stack.",
+    name: "OpenClaw Memory Postgres",
+    description: "Recall canonical OpenClaw memory chunks from the local Postgres memory index.",
     configSchema: Type.Object({
         envPath: Type.Optional(Type.String({ description: "Path to the memory-stack .env file." })),
         databaseUrl: Type.Optional(Type.String({ description: "Postgres manifest database URL." })),
-        milvusAddress: Type.Optional(Type.String({ description: "Milvus host:port." })),
-        milvusCollection: Type.Optional(Type.String({ description: "Milvus collection name." })),
-        ollamaEmbeddingEndpoint: Type.Optional(Type.String({ description: "Ollama /api/embed endpoint." })),
-        ollamaEmbeddingModel: Type.Optional(Type.String({ description: "Ollama embedding model." })),
-        embeddingQueryPrefix: Type.Optional(Type.String({ description: "Optional prefix prepended to embedding queries." })),
     }),
     tools: (tool) => [
         tool({
             name: "memory_recall",
-            description: "Search Brett's canonical OpenClaw memory stack using Milvus vectors plus Postgres full-text fallback. Returns source-path citations.",
+            description: "Search Brett's canonical OpenClaw memory files through the local Postgres full-text index. Returns source-path citations.",
             parameters: Type.Object({
                 query: Type.String({ description: "What to recall." }),
                 limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20, description: "Maximum recall hits." })),
@@ -353,12 +284,11 @@ export default defineToolPlugin({
                 const settings = resolveSettings(config);
                 const requestedLimit = Math.max(1, Math.min(20, Number(limit ?? 8)));
                 const candidateLimit = Math.max(requestedLimit * 6, 30);
-                const [vectorHits, looseTextHits, strictTextHits] = await Promise.all([
-                    searchMilvus(settings, query, candidateLimit),
+                const [looseTextHits, strictTextHits] = await Promise.all([
                     searchPostgres(settings, query, candidateLimit, "loose"),
                     searchPostgres(settings, query, candidateLimit, "strict").catch(() => []),
                 ]);
-                return formatRecall(query, mergeHits(vectorHits, looseTextHits, strictTextHits, query, requestedLimit), settings);
+                return formatRecall(query, mergeHits([], looseTextHits, strictTextHits, query, requestedLimit), settings);
             },
         }),
     ],

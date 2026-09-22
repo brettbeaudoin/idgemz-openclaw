@@ -9,7 +9,6 @@ CREATE TABLE IF NOT EXISTS memory_ingest_runs (
   source_count integer NOT NULL DEFAULT 0,
   span_count integer NOT NULL DEFAULT 0,
   retained_hindsight_count integer NOT NULL DEFAULT 0,
-  indexed_milvus_count integer NOT NULL DEFAULT 0,
   error text
 );
 
@@ -45,7 +44,7 @@ CREATE TABLE IF NOT EXISTS memory_outbox (
   id text PRIMARY KEY,
   span_id text REFERENCES memory_spans(id) ON DELETE CASCADE,
   document_id text,
-  target text NOT NULL CHECK (target IN ('hindsight', 'milvus')),
+  target text NOT NULL CHECK (target IN ('hindsight')),
   content_sha256 text NOT NULL,
   status text NOT NULL DEFAULT 'pending',
   attempts integer NOT NULL DEFAULT 0,
@@ -67,4 +66,3 @@ CREATE INDEX IF NOT EXISTS idx_memory_outbox_pending
   WHERE status = 'pending';
 
 COMMIT;
-

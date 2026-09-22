@@ -30,8 +30,8 @@ cd "$STACK_DIR"
 
 case "$MODE" in
   fast)
-    echo "$(timestamp) memory-stack fast: ingest + Milvus index start"
-    npm run index-milvus
+    echo "$(timestamp) memory-stack fast: Postgres ingest start"
+    npm run ingest
     echo "$(timestamp) memory-stack fast: done"
     ;;
   hindsight)

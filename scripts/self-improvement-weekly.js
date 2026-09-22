@@ -148,20 +148,14 @@ function checkMemoryStack() {
     'Hindsight health endpoint is reachable',
     'Hindsight health check failed'
   );
-  addResult(
-    run('milvus health', 'curl', ['-fsS', 'http://localhost:9091/healthz'], { timeout: 30000 }),
-    'Milvus health endpoint is reachable',
-    'Milvus health check failed'
-  );
-
   const dryRun = run('memory dry-run', 'npm', ['run', 'dry-run'], { cwd: STACK_DIR, timeout: 180000 });
   addResult(dryRun, 'Canonical memory files scan cleanly', 'Memory dry-run failed');
 
-  const milvus = run('memory index-milvus', 'npm', ['run', 'index-milvus'], { cwd: STACK_DIR, timeout: 600000 });
-  if (milvus.ok) {
-    changes.push('Refreshed Postgres manifest and Milvus derived index from canonical files');
+  const ingest = run('memory ingest', 'npm', ['run', 'ingest'], { cwd: STACK_DIR, timeout: 600000 });
+  if (ingest.ok) {
+    changes.push('Refreshed Postgres manifest/index from canonical files');
   } else {
-    needsAttention.push(`Milvus refresh failed: ${summarizeOutput(milvus)}`);
+    needsAttention.push(`Postgres memory ingest failed: ${summarizeOutput(ingest)}`);
   }
 
   const hindsight = run('memory retain', 'npm', ['run', 'retain'], { cwd: STACK_DIR, timeout: 600000 });
@@ -182,11 +176,6 @@ function checkMemoryStackHealthOnly() {
     run('hindsight health', 'curl', ['-fsS', 'http://localhost:8888/health'], { timeout: 30000 }),
     'Hindsight health endpoint is reachable',
     'Hindsight health check failed'
-  );
-  addResult(
-    run('milvus health', 'curl', ['-fsS', 'http://localhost:9091/healthz'], { timeout: 30000 }),
-    'Milvus health endpoint is reachable',
-    'Milvus health check failed'
   );
   addResult(
     run('memory dry-run', 'npm', ['run', 'dry-run'], { cwd: STACK_DIR, timeout: 180000 }),

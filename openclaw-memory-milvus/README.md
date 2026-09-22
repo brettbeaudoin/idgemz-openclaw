@@ -1,16 +1,17 @@
-# OpenClaw Memory Milvus
+# OpenClaw Memory Postgres
 
 OpenClaw tool plugin that exposes `memory_recall` against the local
-Postgres + Milvus memory stack.
+Postgres memory index.
 
 Canonical truth remains `/Users/bbeaudoin/clawd`; this plugin only reads the
-derived Postgres manifest and `openclaw_chunks_nomic_v1` Milvus collection.
-It combines Milvus vector hits with Postgres full-text hits and returns compact
-source-path citations for Active Memory.
+derived Postgres manifest/search index. It combines loose and strict
+Postgres full-text hits, applies the local ranker, and returns compact
+source-path citations for Active Memory. The package/plugin id is still
+`openclaw-memory-milvus` for installed-config compatibility.
 
 Hindsight is still part of the memory stack and retains the same canonical
 chunks, but live recall goes through this plugin so responses can include
-deterministic file/line provenance.
+deterministic file/line provenance without requiring Milvus or TEI.
 
 ## Build
 
@@ -38,8 +39,7 @@ Expected OpenClaw config shape:
       "openclaw-memory-milvus": {
         "enabled": true,
         "config": {
-          "envPath": "/Users/bbeaudoin/clawd/idgemz-openclaw/memory-stack/.env",
-          "milvusCollection": "openclaw_chunks_nomic_v1"
+          "envPath": "/Users/bbeaudoin/clawd/idgemz-openclaw/memory-stack/.env"
         }
       },
       "active-memory": {
@@ -61,8 +61,8 @@ Smoke test:
 
 ```bash
 openclaw agent --agent main \
-  --session-key agent:main:memory-milvus-smoke \
-  --message 'Call memory_recall with query "OpenClaw memory stack Hindsight Milvus bootstrap" and answer with the top citation path only.' \
+  --session-key agent:main:memory-postgres-smoke \
+  --message 'Call memory_recall with query "OpenClaw memory stack Hindsight bootstrap" and answer with the top citation path only.' \
   --json --timeout 180
 ```
 

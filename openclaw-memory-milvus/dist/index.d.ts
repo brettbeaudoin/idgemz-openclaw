@@ -9,7 +9,7 @@ type SearchHit = {
     vectorScore: number;
     textScore: number;
     score: number;
-    backend: "milvus" | "postgres" | "hybrid";
+    backend: "postgres" | "hybrid";
 };
 export declare function tokenizeQuery(query: string): string[];
 export declare function mergeHits(vectorHits: SearchHit[], looseTextHits: SearchHit[], strictTextHits: SearchHit[], query: string, limit: number): SearchHit[];
