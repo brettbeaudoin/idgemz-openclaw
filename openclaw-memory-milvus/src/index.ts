@@ -10,6 +10,9 @@ const { Pool } = pg;
 type PluginConfig = {
   envPath?: string;
   databaseUrl?: string;
+  hindsightBaseUrl?: string;
+  hindsightBankId?: string;
+  hindsightTimeoutMs?: number;
 };
 
 type SearchHit = {
@@ -23,15 +26,19 @@ type SearchHit = {
   vectorScore: number;
   textScore: number;
   score: number;
-  backend: "postgres" | "hybrid";
+  backend: "postgres" | "hindsight" | "hybrid";
 };
 
 type TextSearchMode = "loose" | "strict";
 
 const DEFAULT_ENV_PATH = "/Users/bbeaudoin/clawd/idgemz-openclaw/memory-stack/.env";
 const DEFAULT_DATABASE_URL = "postgresql://localhost:55432/openclaw_memory";
+const DEFAULT_HINDSIGHT_BASE_URL = "http://localhost:8888";
+const DEFAULT_HINDSIGHT_BANK_ID = "openclaw-v1";
+const DEFAULT_HINDSIGHT_TIMEOUT_MS = 2500;
 const RRF_K = 60;
 const DUPLICATE_LINE_WINDOW = 2;
+const SPAN_ID_PATTERN = /\b(?:Postgres\s+span\s+(?:UUID|ID)|memory_span(?:\.id)?|span_id)\s*:\s*([a-f0-9]{40})\b/gi;
 const QUERY_STOP_TERMS = new Set([
   "a", "an", "are", "as", "at", "be", "by", "do", "does", "for", "from", "had", "has", "have", "how", "in",
   "into", "is", "it", "no", "not", "of", "on", "or", "that", "the", "this", "to", "use", "used", "uses", "using",
@@ -67,6 +74,10 @@ function resolveSettings(config: PluginConfig = {}) {
   return {
     envPath,
     databaseUrl: config.databaseUrl || process.env.MEMORY_DATABASE_URL || fileEnv.MEMORY_DATABASE_URL || DEFAULT_DATABASE_URL,
+    hindsightBaseUrl: (config.hindsightBaseUrl || process.env.HINDSIGHT_BASE_URL || fileEnv.HINDSIGHT_BASE_URL || DEFAULT_HINDSIGHT_BASE_URL).replace(/\/+$/, ""),
+    hindsightBankId: config.hindsightBankId || process.env.HINDSIGHT_BANK_ID || fileEnv.HINDSIGHT_BANK_ID || DEFAULT_HINDSIGHT_BANK_ID,
+    hindsightApiKey: process.env.HINDSIGHT_API_KEY || fileEnv.HINDSIGHT_API_KEY || "",
+    hindsightTimeoutMs: Math.max(250, Number(config.hindsightTimeoutMs || process.env.HINDSIGHT_TIMEOUT_MS || fileEnv.HINDSIGHT_TIMEOUT_MS || DEFAULT_HINDSIGHT_TIMEOUT_MS)),
   };
 }
 
@@ -134,6 +145,7 @@ async function searchPostgres(
          src.rel_path,
          src.abs_path,
          src.source_type,
+         sp.span_index,
          sp.start_line,
          sp.end_line,
          sp.text,
@@ -161,6 +173,122 @@ async function searchPostgres(
     }));
   } finally {
     await pool.end();
+  }
+}
+
+async function fetchPostgresSpansByIds(
+  settings: ReturnType<typeof resolveSettings>,
+  spanIds: string[],
+  hindsightScores: Map<string, number>,
+): Promise<SearchHit[]> {
+  const ids = [...new Set(spanIds)].filter(Boolean);
+  if (ids.length === 0) return [];
+  const pool = new Pool({ connectionString: settings.databaseUrl });
+  try {
+    const response = await pool.query(
+      `SELECT
+         sp.id,
+         src.rel_path,
+         src.abs_path,
+         src.source_type,
+         sp.start_line,
+         sp.end_line,
+         sp.text
+       FROM memory_spans sp
+       JOIN memory_sources src ON src.id = sp.source_id
+       WHERE sp.id = ANY($1::text[])
+       ORDER BY array_position($1::text[], sp.id) ASC`,
+      [ids],
+    );
+    return response.rows.map((row: Record<string, unknown>) => {
+      const id = String(row.id);
+      const score = hindsightScores.get(id) ?? 0;
+      return {
+        id,
+        relPath: String(row.rel_path ?? ""),
+        absPath: String(row.abs_path ?? ""),
+        sourceType: String(row.source_type ?? ""),
+        startLine: numberValue(row.start_line),
+        endLine: numberValue(row.end_line),
+        text: String(row.text ?? ""),
+        vectorScore: score,
+        textScore: 0,
+        score,
+        backend: "hindsight",
+      };
+    });
+  } finally {
+    await pool.end();
+  }
+}
+
+function extractSpanIdsFromText(text: string | undefined): string[] {
+  if (!text) return [];
+  SPAN_ID_PATTERN.lastIndex = 0;
+  return [...text.matchAll(SPAN_ID_PATTERN)].map((match) => String(match[1] ?? ""));
+}
+
+export function extractSpanIdsFromHindsightResponse(payload: unknown): string[] {
+  const ids: string[] = [];
+  const data = payload as {
+    results?: Array<{ text?: string; context?: string; metadata?: Record<string, unknown>; chunk_id?: string | null; source_fact_ids?: string[] | null }>;
+    chunks?: Record<string, { text?: string }> | null;
+    source_facts?: Record<string, { text?: string; context?: string; metadata?: Record<string, unknown>; chunk_id?: string | null }> | null;
+  };
+  const addFromItem = (item: { text?: string; context?: string; metadata?: Record<string, unknown>; chunk_id?: string | null } | undefined) => {
+    if (!item) return;
+    ids.push(...extractSpanIdsFromText(item.text));
+    ids.push(...extractSpanIdsFromText(item.context));
+    for (const value of Object.values(item.metadata ?? {})) {
+      if (typeof value === "string") ids.push(...extractSpanIdsFromText(value));
+    }
+    const chunkText = item.chunk_id ? data.chunks?.[item.chunk_id]?.text : undefined;
+    ids.push(...extractSpanIdsFromText(chunkText));
+  };
+  for (const result of data.results ?? []) {
+    addFromItem(result);
+    for (const sourceFactId of result.source_fact_ids ?? []) {
+      addFromItem(data.source_facts?.[sourceFactId]);
+    }
+  }
+  return [...new Set(ids)];
+}
+
+async function searchHindsightSpanIds(
+  settings: ReturnType<typeof resolveSettings>,
+  query: string,
+  limit: number,
+): Promise<{ spanIds: string[]; scores: Map<string, number>; unavailable?: string }> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), settings.hindsightTimeoutMs);
+  try {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (settings.hindsightApiKey) headers.authorization = `Bearer ${settings.hindsightApiKey}`;
+    const response = await fetch(`${settings.hindsightBaseUrl}/v1/default/banks/${encodeURIComponent(settings.hindsightBankId)}/memories/recall`, {
+      method: "POST",
+      headers,
+      signal: controller.signal,
+      body: JSON.stringify({
+        query,
+        types: ["world", "experience"],
+        budget: "low",
+        max_tokens: 500,
+        include: { entities: null, chunks: {} },
+        tags: ["workspace:clawd"],
+        tags_match: "any_strict",
+      }),
+    });
+    if (!response.ok) return { spanIds: [], scores: new Map(), unavailable: `HTTP ${response.status}` };
+    const payload = await response.json();
+    const limitedSpanIds = extractSpanIdsFromHindsightResponse(payload).slice(0, limit);
+    const scores = new Map<string, number>();
+    limitedSpanIds.forEach((id, index) => scores.set(id, Math.max(0.05, 1 - (index * 0.05))));
+    return { spanIds: limitedSpanIds, scores };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { spanIds: [], scores: new Map(), unavailable: message };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -260,19 +388,30 @@ export function mergeHits(
   return collapseNearbyDuplicates(ranked, limit);
 }
 
-function formatRecall(query: string, hits: SearchHit[], settings: ReturnType<typeof resolveSettings>) {
+function formatRecall(
+  query: string,
+  hits: SearchHit[],
+  settings: ReturnType<typeof resolveSettings>,
+  hindsightStatus: string,
+  usedHindsightSpans: boolean,
+) {
+  const backend = usedHindsightSpans ? "hindsight+postgres" : "postgres";
+  const collection = usedHindsightSpans ? "hindsight-router+postgres-full-text" : "postgres-full-text";
+  const summaryPrefix = usedHindsightSpans ? "Hindsight-routed Postgres memory recall" : "Postgres memory recall";
   if (hits.length === 0) {
     return {
       summary: `No Postgres memory hits for: ${query}`,
-      backend: "postgres",
-      collection: "postgres-full-text",
+      backend,
+      collection,
+      hindsightStatus,
       results: [],
     };
   }
   return {
     summary: [
-      `Postgres memory recall for: ${query}`,
+      `${summaryPrefix} for: ${query}`,
       `Index: ${settings.databaseUrl.replace(/:[^:@/]+@/, ":***@")}`,
+      `Hindsight: ${hindsightStatus}`,
       "",
       ...hits.map((hit, index) => [
         `${index + 1}. ${hit.relPath}:${hit.startLine}`,
@@ -281,8 +420,9 @@ function formatRecall(query: string, hits: SearchHit[], settings: ReturnType<typ
         `Source: ${hit.relPath}#L${hit.startLine}${hit.endLine && hit.endLine !== hit.startLine ? `-L${hit.endLine}` : ""}`,
       ].join("\n")),
     ].join("\n\n"),
-    backend: "postgres",
-    collection: "postgres-full-text",
+    backend,
+    collection,
+    hindsightStatus,
     results: hits.map((hit) => ({
       path: hit.relPath,
       startLine: hit.startLine,
@@ -304,6 +444,9 @@ export default defineToolPlugin({
   configSchema: Type.Object({
     envPath: Type.Optional(Type.String({ description: "Path to the memory-stack .env file." })),
     databaseUrl: Type.Optional(Type.String({ description: "Postgres manifest database URL." })),
+    hindsightBaseUrl: Type.Optional(Type.String({ description: "Hindsight API base URL." })),
+    hindsightBankId: Type.Optional(Type.String({ description: "Hindsight bank id." })),
+    hindsightTimeoutMs: Type.Optional(Type.Number({ description: "Hindsight recall timeout in milliseconds." })),
   }),
   tools: (tool) => [
     tool({
@@ -317,6 +460,7 @@ export default defineToolPlugin({
         summary: Type.String(),
         backend: Type.String(),
         collection: Type.String(),
+        hindsightStatus: Type.Optional(Type.String()),
         results: Type.Array(Type.Object({
           path: Type.String(),
           startLine: Type.Number(),
@@ -333,11 +477,22 @@ export default defineToolPlugin({
         const settings = resolveSettings(config);
         const requestedLimit = Math.max(1, Math.min(20, Number(limit ?? 8)));
         const candidateLimit = Math.max(requestedLimit * 6, 30);
-        const [looseTextHits, strictTextHits] = await Promise.all([
+        const [hindsightResult, looseTextHits, strictTextHits] = await Promise.all([
+          searchHindsightSpanIds(settings, query, candidateLimit),
           searchPostgres(settings, query, candidateLimit, "loose"),
           searchPostgres(settings, query, candidateLimit, "strict").catch(() => []),
         ]);
-        return formatRecall(query, mergeHits([], looseTextHits, strictTextHits, query, requestedLimit), settings);
+        const hindsightHits = await fetchPostgresSpansByIds(settings, hindsightResult.spanIds, hindsightResult.scores).catch(() => []);
+        const hindsightStatus = hindsightResult.unavailable
+          ? `unavailable (${hindsightResult.unavailable})`
+          : `ok (${hindsightHits.length} span${hindsightHits.length === 1 ? "" : "s"})`;
+        return formatRecall(
+          query,
+          mergeHits(hindsightHits, looseTextHits, strictTextHits, query, requestedLimit),
+          settings,
+          hindsightStatus,
+          hindsightHits.length > 0,
+        );
       },
     }),
   ],

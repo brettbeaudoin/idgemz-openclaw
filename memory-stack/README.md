@@ -17,13 +17,16 @@ stack can boot without committing or storing an OpenAI key. Set
 `HINDSIGHT_API_LLM_PROVIDER=openai` and `HINDSIGHT_API_LLM_API_KEY` only in your
 local `.env` if you want hosted extraction.
 
-Live OpenClaw recall reads Postgres full-text results and applies the local
-reranker in the `memory_recall` plugin. It does not require Milvus, TEI, or a
-query embedding service.
+Live OpenClaw recall asks Hindsight for fuzzy semantic candidates, resolves any
+returned Postgres `memory_spans.id` markers back through Postgres, also runs
+Postgres full-text search, and applies the local reranker in the `memory_recall`
+plugin. Final snippets and citations still come from Postgres/source files. It
+does not require Milvus. When Hindsight or its TEI embedding sidecar is
+unavailable, recall falls back to Postgres full-text.
 
 Hindsight keeps TEI as its embedding sidecar because the embedded ONNX path was
 still killed by the same local memory spike observed during bootstrap. TEI is
-not in the live recall path.
+used only through Hindsight; the Postgres fallback path does not depend on it.
 
 ## First Run
 
@@ -55,7 +58,11 @@ npm run bootstrap
 
 `ingest` writes the Postgres manifest/search index and Hindsight outbox.
 `retain` sends one coherent document per source file to Hindsight with
-`update_mode=replace`.
+`update_mode=replace`. The retained content includes explicit Postgres span ids
+before each canonical span so Hindsight can act as a semantic router while
+Postgres remains the provenance source. Async retain acceptance marks outbox
+rows `queued`; queued rows older than 12 hours are retried on the next retain
+run.
 
 ## Scheduler
 
@@ -69,7 +76,8 @@ The fast mode runs `npm run ingest`, which scans and hashes source files every
 time. Unchanged files only refresh `memory_sources.last_seen_at`; they do not
 rewrite spans or enqueue Hindsight work.
 
-Hindsight is slower and not in the live recall path, so it runs hourly:
+Hindsight is slower than Postgres and has a hard Postgres fallback, so it runs
+hourly:
 
 ```bash
 /Users/bbeaudoin/clawd/idgemz-openclaw/scripts/cron-memory-stack-refresh.sh hindsight

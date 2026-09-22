@@ -12,6 +12,7 @@ const { Pool } = require('pg');
 
 const PARSER_VERSION = 'file-parser-v1';
 const CHUNK_RECIPE = process.env.MEMORY_CHUNK_RECIPE || 'file-span-v1/plain-v1/postgres-full-text';
+const HINDSIGHT_RETAIN_FORMAT_VERSION = 'hindsight-source-spans-v2';
 const TEXT_EXTENSIONS = new Set(['.md', '.txt', '.json', '.jsonl', '.log']);
 const CODE_EXTENSIONS = new Set(['.js', '.ts', '.py', '.sh', '.sql', '.yaml', '.yml']);
 const DEFAULT_CONTEXT_FILES = new Set([
@@ -226,6 +227,7 @@ async function writeManifest(pool, sources, mode) {
           const savedId = savedSpanIds.get(span.spanIndex);
           if (savedId) span.id = savedId;
         }
+        await upsertHindsightOutbox(pool, source);
         continue;
       }
     }
@@ -292,27 +294,9 @@ async function writeManifest(pool, sources, mode) {
       );
       span.id = savedSpan.rows[0].id;
 
-      await pool.query(
-        `INSERT INTO memory_outbox (
-           id, span_id, document_id, target, content_sha256, status, updated_at
-         ) VALUES ($1,$2,$3,'hindsight',$4,'pending',now())
-         ON CONFLICT (id) DO UPDATE SET
-           span_id = excluded.span_id,
-           document_id = excluded.document_id,
-           content_sha256 = excluded.content_sha256,
-           status = CASE
-             WHEN memory_outbox.content_sha256 = excluded.content_sha256 THEN memory_outbox.status
-             ELSE 'pending'
-           END,
-           updated_at = now()`,
-        [
-          stableId('outbox', 'hindsight', span.id, span.textSha256),
-          span.id,
-          `file:${source.relPath}`,
-          span.textSha256
-        ]
-      );
     }
+
+    await upsertHindsightOutbox(pool, source);
 
     await pool.query(
       `DELETE FROM memory_spans
@@ -341,14 +325,6 @@ async function writeManifest(pool, sources, mode) {
     );
   }
 
-  const obsoleteOutbox = await pool.query(
-    `DELETE FROM memory_outbox ob
-     USING memory_spans sp
-     WHERE ob.span_id = sp.id
-       AND ob.content_sha256 <> sp.text_sha256
-     RETURNING ob.id`
-  );
-
   await pool.query(
     `UPDATE memory_ingest_runs
      SET finished_at = now()
@@ -360,8 +336,87 @@ async function writeManifest(pool, sources, mode) {
     skippedSources,
     changedSources,
     deletedSources: deletedSourceIds.length,
-    obsoleteOutboxRows: obsoleteOutbox.rows.length
+    obsoleteOutboxRows: 0
   };
+}
+
+function hindsightContentSha(span) {
+  return sha256([HINDSIGHT_RETAIN_FORMAT_VERSION, span.id, span.textSha256].join('\0'));
+}
+
+function hindsightOutboxId(span) {
+  return stableId('outbox', 'hindsight', span.id);
+}
+
+async function upsertHindsightOutbox(pool, source) {
+  for (const span of source.spans) {
+    await pool.query(
+      `INSERT INTO memory_outbox (
+         id, span_id, document_id, target, content_sha256, status, updated_at
+       ) VALUES (
+         $1,$2,$3,'hindsight',$4,
+         COALESCE((
+           SELECT status
+           FROM memory_outbox
+           WHERE target = 'hindsight'
+             AND span_id = $2
+             AND content_sha256 = $4
+           ORDER BY updated_at DESC
+           LIMIT 1
+         ), 'pending'),
+         now()
+       )
+       ON CONFLICT (id) DO UPDATE SET
+         span_id = excluded.span_id,
+         document_id = excluded.document_id,
+         content_sha256 = excluded.content_sha256,
+         status = CASE
+           WHEN memory_outbox.content_sha256 = excluded.content_sha256 THEN memory_outbox.status
+           ELSE 'pending'
+         END,
+         updated_at = CASE
+           WHEN memory_outbox.content_sha256 = excluded.content_sha256 THEN memory_outbox.updated_at
+           ELSE now()
+         END`,
+      [
+        hindsightOutboxId(span),
+        span.id,
+        `file:${source.relPath}`,
+        hindsightContentSha(span)
+      ]
+    );
+  }
+
+  await pool.query(
+    `DELETE FROM memory_outbox
+     WHERE target = 'hindsight'
+       AND document_id = $1
+       AND id <> ALL($2::text[])`,
+    [`file:${source.relPath}`, source.spans.map((span) => hindsightOutboxId(span))]
+  );
+}
+
+function hindsightRetainContent(source) {
+  return [
+    `Source path: ${source.relPath}`,
+    `Source sha256: ${source.contentSha256}`,
+    `Source type: ${source.sourceType}`,
+    `Hindsight retain format: ${HINDSIGHT_RETAIN_FORMAT_VERSION}`,
+    '',
+    'Each canonical span below includes its Postgres memory_span id. If a memory fact is extracted from a span, keep that id available for later retrieval and provenance.',
+    '',
+    ...source.spans.flatMap((span) => [
+      `--- BEGIN POSTGRES MEMORY SPAN ${span.spanIndex} ---`,
+      `Postgres span UUID: ${span.id}`,
+      `Postgres span index: ${span.spanIndex}`,
+      `Source lines: ${span.startLine}-${span.endLine}`,
+      `Span sha256: ${span.textSha256}`,
+      '',
+      span.text,
+      `--- END POSTGRES MEMORY SPAN ${span.spanIndex} ---`,
+      ''
+    ])
+  ].join('\n');
 }
 
 async function retainInHindsight(pool, sources) {
@@ -375,21 +430,17 @@ async function retainInHindsight(pool, sources) {
     `SELECT DISTINCT document_id
      FROM memory_outbox
      WHERE target = 'hindsight'
-       AND status = 'pending'`
+       AND (
+         status = 'pending'
+         OR (status = 'queued' AND updated_at < now() - interval '12 hours')
+       )`
   );
   const pendingDocuments = new Set(pending.rows.map((row) => row.document_id));
   for (const source of sources.filter((source) => pendingDocuments.has(`file:${source.relPath}`))) {
-    const content = fs.readFileSync(source.absPath, 'utf8');
     const payload = {
       items: [{
-        content: [
-          `Source path: ${source.relPath}`,
-          `Source sha256: ${source.contentSha256}`,
-          `Source type: ${source.sourceType}`,
-          '',
-          content
-        ].join('\n'),
-        context: 'OpenClaw canonical file memory for Dangerboat assisting Brett. Source path and hash are canonical provenance; verify important claims against the source file.',
+        content: hindsightRetainContent(source),
+        context: 'OpenClaw canonical file memory for Dangerboat assisting Brett. Source path, hash, and Postgres span ids are canonical provenance; verify important claims against the source file.',
         document_id: `file:${source.relPath}`,
         update_mode: 'replace',
         timestamp: 'unset',
@@ -398,7 +449,9 @@ async function retainInHindsight(pool, sources) {
           rel_path: source.relPath,
           source_type: source.sourceType,
           sha256: source.contentSha256,
-          parser_version: PARSER_VERSION
+          parser_version: PARSER_VERSION,
+          retain_format: HINDSIGHT_RETAIN_FORMAT_VERSION,
+          span_ids_json: JSON.stringify(source.spans.map((span) => span.id))
         },
         tags: [
           'source:file',
@@ -408,7 +461,7 @@ async function retainInHindsight(pool, sources) {
         ],
         observation_scopes: [['workspace:clawd']]
       }],
-      async: true
+      async: boolEnv('HINDSIGHT_RETAIN_ASYNC', true)
     };
 
     const response = await fetch(`${baseUrl}/v1/default/banks/${encodeURIComponent(bankId)}/memories`, {
@@ -430,10 +483,11 @@ async function retainInHindsight(pool, sources) {
     retained += 1;
     await pool.query(
       `UPDATE memory_outbox
-       SET status = 'sent', attempts = attempts + 1, last_error = null, updated_at = now()
+       SET status = $2, attempts = attempts + 1, last_error = null, updated_at = now()
        WHERE target = 'hindsight'
-         AND document_id = $1`,
-      [`file:${source.relPath}`]
+         AND document_id = $1
+         AND status IN ('pending', 'queued')`,
+      [`file:${source.relPath}`, payload.async ? 'queued' : 'sent']
     );
   }
   return retained;

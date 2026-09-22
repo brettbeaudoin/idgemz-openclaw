@@ -191,22 +191,26 @@ function checkMemoryStackHealthOnly() {
     '-c',
     [
       "select coalesce(sum(case when status = 'failed' then 1 else 0 end),0) from memory_outbox;",
-      "select coalesce(sum(case when status = 'pending' and updated_at < now() - interval '2 hours' then 1 else 0 end),0) from memory_outbox;"
+      "select coalesce(sum(case when status = 'pending' and updated_at < now() - interval '2 hours' then 1 else 0 end),0) from memory_outbox;",
+      "select coalesce(sum(case when status = 'queued' and updated_at < now() - interval '13 hours' then 1 else 0 end),0) from memory_outbox;"
     ].join(' ')
   ], { cwd: STACK_DIR, timeout: 60000 });
   if (!outbox.ok) {
     needsAttention.push(`Memory outbox check failed: ${summarizeOutput(outbox)}`);
     return;
   }
-  const [failed, stalePending] = outbox.stdout.split(/\r?\n/).map((value) => Number(value.trim()));
+  const [failed, stalePending, staleQueued] = outbox.stdout.split(/\r?\n/).map((value) => Number(value.trim()));
   if ((failed || 0) > 0) {
     needsAttention.push(`Memory outbox has ${failed} failed row(s)`);
   }
   if ((stalePending || 0) > 0) {
     needsAttention.push(`Memory outbox has ${stalePending} pending row(s) older than 2 hours`);
   }
-  if ((failed || 0) === 0 && (stalePending || 0) === 0) {
-    ok.push('Memory outbox has no failed or stale pending rows');
+  if ((staleQueued || 0) > 0) {
+    needsAttention.push(`Memory outbox has ${staleQueued} queued Hindsight row(s) older than 13 hours`);
+  }
+  if ((failed || 0) === 0 && (stalePending || 0) === 0 && (staleQueued || 0) === 0) {
+    ok.push('Memory outbox has no failed, stale pending, or stale queued rows');
   }
 }
 

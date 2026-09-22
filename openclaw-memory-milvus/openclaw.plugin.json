@@ -13,6 +13,18 @@
       "databaseUrl": {
         "type": "string",
         "description": "Postgres manifest database URL."
+      },
+      "hindsightBaseUrl": {
+        "type": "string",
+        "description": "Hindsight API base URL."
+      },
+      "hindsightBankId": {
+        "type": "string",
+        "description": "Hindsight bank id."
+      },
+      "hindsightTimeoutMs": {
+        "type": "number",
+        "description": "Hindsight recall timeout in milliseconds."
       }
     }
   },

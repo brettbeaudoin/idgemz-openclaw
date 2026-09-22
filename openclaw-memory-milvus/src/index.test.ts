@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import entry, { mergeHits } from "./index.js";
+import entry, { extractSpanIdsFromHindsightResponse, mergeHits } from "./index.js";
 import { getToolPluginMetadata } from "openclaw/plugin-sdk/tool-plugin";
 
 describe("openclaw-memory-milvus", () => {
@@ -51,6 +51,41 @@ describe("openclaw-memory-milvus", () => {
 
     expect(ranked.map((item) => item.id).sort()).toEqual(["a", "c"]);
   });
+
+  it("extracts Postgres span ids from Hindsight result chunks", () => {
+    const spanId = "1234567890abcdef1234567890abcdef12345678";
+    const ids = extractSpanIdsFromHindsightResponse({
+      results: [{ id: "fact-1", text: "Remembered fact", chunk_id: "chunk-1" }],
+      chunks: {
+        "chunk-1": {
+          text: [
+            "--- BEGIN POSTGRES MEMORY SPAN 2 ---",
+            `Postgres span UUID: ${spanId}`,
+            "Source lines: 10-12",
+            "The actual source text.",
+          ].join("\n"),
+        },
+      },
+    });
+
+    expect(ids).toEqual([spanId]);
+  });
+
+  it("deduplicates Hindsight span ids across facts and chunks", () => {
+    const spanId = "abcdef1234567890abcdef1234567890abcdef12";
+    const ids = extractSpanIdsFromHindsightResponse({
+      results: [
+        { id: "fact-1", text: `memory_span.id: ${spanId}`, chunk_id: "chunk-1" },
+        { id: "fact-2", text: "Another fact", chunk_id: "chunk-1" },
+      ],
+      chunks: {
+        "chunk-1": { text: `Postgres span ID: ${spanId}` },
+      },
+    });
+
+    expect(ids).toEqual([spanId]);
+  });
+
 });
 
 function hit(overrides: Partial<Parameters<typeof mergeHits>[0][number]>): Parameters<typeof mergeHits>[0][number] {

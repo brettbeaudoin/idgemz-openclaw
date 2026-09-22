@@ -3,15 +3,19 @@
 OpenClaw tool plugin that exposes `memory_recall` against the local
 Postgres memory index.
 
-Canonical truth remains `/Users/bbeaudoin/clawd`; this plugin only reads the
-derived Postgres manifest/search index. It combines loose and strict
-Postgres full-text hits, applies the local ranker, and returns compact
-source-path citations for Active Memory. The package/plugin id is still
+Canonical truth remains `/Users/bbeaudoin/clawd`; this plugin only returns
+snippets and citations from the derived Postgres manifest/search index. It asks
+Hindsight for fuzzy semantic candidates first, resolves any returned Postgres
+`memory_spans.id` markers back through Postgres, combines those candidates with
+loose and strict Postgres full-text hits, applies the local ranker, and returns
+compact source-path citations for Active Memory. The package/plugin id is still
 `openclaw-memory-milvus` for installed-config compatibility.
 
 Hindsight is still part of the memory stack and retains the same canonical
-chunks, but live recall goes through this plugin so responses can include
-deterministic file/line provenance without requiring Milvus or TEI.
+chunks with explicit Postgres span markers. It is a semantic router, not the
+source of truth: if Hindsight is down, slow, or returns no span ids, the plugin
+falls back to Postgres full-text only. TEI remains Hindsight's embedding
+sidecar, but Postgres fallback does not depend on it.
 
 ## Build
 
