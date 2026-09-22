@@ -36,6 +36,85 @@ describe("openclaw-memory-milvus", () => {
     expect(ranked[0]?.id).toBe("specific");
   });
 
+  it("does not treat token substrings as exact distinctive matches", () => {
+    const substringOnly = hit({
+      id: "substring-only",
+      relPath: "memory/2026-09-21.md",
+      startLine: 1,
+      endLine: 1,
+      text: "The catalog mentions scarab design notes and archived shells.",
+      textScore: 1,
+    });
+    const exactToken = hit({
+      id: "exact-token",
+      relPath: "memory/2026-09-21.md",
+      startLine: 10,
+      endLine: 10,
+      text: "The CAR SKU needs the current product mapping.",
+      textScore: 0.9,
+    });
+
+    const ranked = mergeHits([], [substringOnly, exactToken], [], "CAR SKU", 2);
+
+    expect(ranked[0]?.id).toBe("exact-token");
+    expect(ranked.find((item) => item.id === "substring-only")?.lexicalFeatureScore).toBeLessThan(
+      ranked.find((item) => item.id === "exact-token")?.lexicalFeatureScore ?? 0,
+    );
+  });
+
+  it("matches Unicode and structured ID tokens without ASCII-only substring logic", () => {
+    const generic = hit({
+      id: "generic",
+      relPath: "memory/2026-09-21.md",
+      text: "A cafe note references BHT2STE version history.",
+      textScore: 1,
+    });
+    const specific = hit({
+      id: "specific",
+      relPath: "memory/2026-09-21.md",
+      text: "The café order used structured ID BHT2STE-V2 and should keep the exact SKU.",
+      textScore: 0.8,
+    });
+
+    const ranked = mergeHits([], [generic, specific], [], "café BHT2STE-V2", 2);
+
+    expect(ranked[0]?.id).toBe("specific");
+  });
+
+  it("keeps lexical-only provenance as postgres while exposing both lexical ranks", () => {
+    const sameHit = hit({
+      id: "same",
+      relPath: "CURRENT.md",
+      text: "Hindsight retain queue has serialized Ollama workers.",
+      textScore: 1,
+    });
+
+    const [ranked] = mergeHits([], [sameHit], [sameHit], "Hindsight retain queue", 1);
+
+    expect(ranked?.backend).toBe("postgres");
+    expect(ranked?.looseLexicalRank).toBe(1);
+    expect(ranked?.strictLexicalRank).toBe(1);
+    expect(ranked?.vectorRank).toBeUndefined();
+    expect(ranked?.rrfScore).toBeGreaterThan(0);
+  });
+
+  it("marks provenance hybrid only when vector and lexical arms both find the hit", () => {
+    const sameHit = hit({
+      id: "same",
+      relPath: "CURRENT.md",
+      text: "Hindsight retain queue has serialized Ollama workers.",
+      vectorScore: 1,
+      textScore: 1,
+      backend: "hindsight",
+    });
+
+    const [ranked] = mergeHits([sameHit], [sameHit], [], "Hindsight retain queue", 1);
+
+    expect(ranked?.backend).toBe("hybrid");
+    expect(ranked?.vectorRank).toBe(1);
+    expect(ranked?.looseLexicalRank).toBe(1);
+  });
+
   it("collapses nearby duplicate spans from the same source", () => {
     const ranked = mergeHits(
       [],

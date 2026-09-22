@@ -11,6 +11,19 @@ const DEFAULT_HINDSIGHT_BANK_ID = "openclaw-v1";
 const DEFAULT_HINDSIGHT_TIMEOUT_MS = 2500;
 const RRF_K = 60;
 const DUPLICATE_LINE_WINDOW = 2;
+const TOKEN_PATTERN = /[\p{L}\p{N}]+(?:[-_/][\p{L}\p{N}]+)*/gu;
+const DEFAULT_RANKING_WEIGHTS = {
+    vectorRrf: 0.8,
+    looseLexicalRrf: 1,
+    strictLexicalRrf: 1.6,
+    distinctiveTerm: 0.06,
+    phrase: 0.03,
+    allDistinctiveTerms: 0.015,
+    currentSource: 0.015,
+    memorySource: 0.01,
+    dailyMemorySource: 0.012,
+    metaResultPenalty: -0.05,
+};
 const SPAN_ID_PATTERN = /\b(?:Postgres\s+span\s+(?:UUID|ID)|memory_span(?:\.id)?|span_id)\s*:\s*([a-f0-9]{40})\b/gi;
 const QUERY_STOP_TERMS = new Set([
     "a", "an", "are", "as", "at", "be", "by", "do", "does", "for", "from", "had", "has", "have", "how", "in",
@@ -52,6 +65,7 @@ function resolveSettings(config = {}) {
         hindsightBankId: config.hindsightBankId || process.env.HINDSIGHT_BANK_ID || fileEnv.HINDSIGHT_BANK_ID || DEFAULT_HINDSIGHT_BANK_ID,
         hindsightApiKey: process.env.HINDSIGHT_API_KEY || fileEnv.HINDSIGHT_API_KEY || "",
         hindsightTimeoutMs: Math.max(250, Number(config.hindsightTimeoutMs || process.env.HINDSIGHT_TIMEOUT_MS || fileEnv.HINDSIGHT_TIMEOUT_MS || DEFAULT_HINDSIGHT_TIMEOUT_MS)),
+        rankingWeights: { ...DEFAULT_RANKING_WEIGHTS, ...(config.rankingWeights ?? {}) },
     };
 }
 function numberValue(value, fallback = 0) {
@@ -72,10 +86,13 @@ function normalizePath(absPath, relPath) {
     return path.relative("/Users/bbeaudoin/clawd", absPath);
 }
 function normalizeSearchText(text) {
-    return text.toLowerCase().replace(/[^a-z0-9_-]+/g, " ").replace(/\s+/g, " ").trim();
+    return tokenizeText(text).join(" ");
+}
+function tokenizeText(text) {
+    return [...text.toLocaleLowerCase().matchAll(TOKEN_PATTERN)].map((match) => match[0]);
 }
 export function tokenizeQuery(query) {
-    return [...new Set(query.toLowerCase().match(/[a-z0-9][a-z0-9_-]{1,}/g) ?? [])]
+    return [...new Set(tokenizeText(query))]
         .map((term) => term.replace(/'/g, ""));
 }
 function buildLexicalTsQuery(query, mode) {
@@ -222,8 +239,8 @@ function evidenceOverlapBoost(spanText, evidenceText) {
     const terms = distinctiveTerms(evidenceText);
     if (terms.length === 0)
         return 0;
-    const haystack = normalizeSearchText(spanText);
-    const matched = terms.filter((term) => haystack.includes(term)).length;
+    const haystack = new Set(tokenizeText(spanText));
+    const matched = terms.filter((term) => haystack.has(term)).length;
     return Math.min(0.5, (matched / terms.length) * 0.5);
 }
 function extractSpanCandidatesFromHindsightResponse(payload) {
@@ -299,30 +316,43 @@ async function searchHindsightSpanIds(settings, query, limit) {
 function reciprocalRank(rank, weight) {
     return weight / (RRF_K + rank);
 }
-function sourceQualityBoost(hit) {
+function sourceQualityBoost(hit, weights) {
     if (hit.relPath === "CURRENT.md")
-        return 0.05;
+        return weights.currentSource;
     if (hit.relPath === "MEMORY.md")
-        return 0.03;
+        return weights.memorySource;
     if (/^memory\/\d{4}-\d{2}-\d{2}\.md$/.test(hit.relPath))
-        return 0.04;
+        return weights.dailyMemorySource;
     return 0;
 }
-function metaResultPenalty(query, hit) {
+function metaResultPenalty(query, hit, weights) {
     const normalizedQuery = normalizeSearchText(query);
     if (/\b(benchmark|test|query|ranking|ranker|evaluation|eval)\b/.test(normalizedQuery))
         return 0;
     const normalizedHit = normalizeSearchText(hit.text);
-    return /\b(benchmark|query set|missed the|tuning target|hit@|mrr)\b/.test(normalizedHit) ? -0.25 : 0;
+    return /\b(benchmark|query set|missed the|tuning target|hit@|mrr)\b/.test(normalizedHit) ? weights.metaResultPenalty : 0;
 }
-function lexicalBoost(hit, terms, phrases) {
-    const haystack = normalizeSearchText(`${hit.relPath} ${hit.text}`);
-    const matchedTerms = terms.filter((term) => haystack.includes(term)).length;
+function phraseMatches(tokens, phrase) {
+    const phraseTokens = phrase.split(" ");
+    if (phraseTokens.length === 0 || tokens.length < phraseTokens.length)
+        return false;
+    for (let index = 0; index <= tokens.length - phraseTokens.length; index += 1) {
+        if (phraseTokens.every((token, offset) => tokens[index + offset] === token))
+            return true;
+    }
+    return false;
+}
+function lexicalBoost(hit, terms, phrases, weights) {
+    const haystackTokens = tokenizeText(`${hit.relPath} ${hit.text}`);
+    const haystack = new Set(haystackTokens);
+    const matchedTerms = terms.filter((term) => haystack.has(term)).length;
     const coverage = terms.length > 0 ? matchedTerms / terms.length : 0;
-    const matchedPhrases = phrases.filter((phrase) => haystack.includes(phrase)).length;
+    const matchedPhrases = phrases.filter((phrase) => phraseMatches(haystackTokens, phrase)).length;
     const phraseCoverage = phrases.length > 0 ? matchedPhrases / phrases.length : 0;
     const allDistinctiveTermsMatched = terms.length > 0 && matchedTerms === terms.length;
-    return (coverage * 0.6) + (phraseCoverage * 0.25) + (allDistinctiveTermsMatched ? 0.15 : 0);
+    return (coverage * weights.distinctiveTerm)
+        + (phraseCoverage * weights.phrase)
+        + (allDistinctiveTermsMatched ? weights.allDistinctiveTerms : 0);
 }
 function collapseNearbyDuplicates(hits, limit) {
     const kept = [];
@@ -337,42 +367,52 @@ function collapseNearbyDuplicates(hits, limit) {
     }
     return kept;
 }
-export function mergeHits(vectorHits, looseTextHits, strictTextHits, query, limit) {
+export function mergeHits(vectorHits, looseTextHits, strictTextHits, query, limit, weights = DEFAULT_RANKING_WEIGHTS) {
     const byId = new Map();
     const maxVector = Math.max(1, ...vectorHits.map((hit) => hit.vectorScore));
     const maxText = Math.max(1, ...looseTextHits.map((hit) => hit.textScore), ...strictTextHits.map((hit) => hit.textScore));
     const rrfScores = new Map();
     const terms = distinctiveTerms(query);
     const phrases = queryPhrases(query);
-    const addHit = (hit, rank, weight, normalizedScores) => {
+    const addHit = (hit, rank, weight, normalizedScores, rankField) => {
         const existing = byId.get(hit.id);
         if (existing) {
             existing.vectorScore = Math.max(existing.vectorScore, normalizedScores.vectorScore ?? 0);
             existing.textScore = Math.max(existing.textScore, normalizedScores.textScore ?? 0);
-            existing.backend = "hybrid";
+            existing[rankField] = Math.min(existing[rankField] ?? rank, rank);
+            if ((existing.vectorRank || rankField === "vectorRank") && (existing.looseLexicalRank || existing.strictLexicalRank || rankField !== "vectorRank")) {
+                existing.backend = "hybrid";
+            }
         }
         else {
-            byId.set(hit.id, { ...hit, ...normalizedScores });
+            byId.set(hit.id, { ...hit, ...normalizedScores, [rankField]: rank });
         }
         rrfScores.set(hit.id, (rrfScores.get(hit.id) ?? 0) + reciprocalRank(rank, weight));
     };
     for (const [index, hit] of vectorHits.entries()) {
-        addHit(hit, index + 1, 0.8, { vectorScore: hit.vectorScore / maxVector, textScore: 0 });
+        addHit(hit, index + 1, weights.vectorRrf, { vectorScore: hit.vectorScore / maxVector, textScore: 0 }, "vectorRank");
     }
     for (const [index, hit] of looseTextHits.entries()) {
-        addHit(hit, index + 1, 1.0, { vectorScore: 0, textScore: hit.textScore / maxText });
+        addHit(hit, index + 1, weights.looseLexicalRrf, { vectorScore: 0, textScore: hit.textScore / maxText }, "looseLexicalRank");
     }
     for (const [index, hit] of strictTextHits.entries()) {
-        addHit(hit, index + 1, 1.6, { vectorScore: 0, textScore: hit.textScore / maxText });
+        addHit(hit, index + 1, weights.strictLexicalRrf, { vectorScore: 0, textScore: hit.textScore / maxText }, "strictLexicalRank");
     }
     const ranked = [...byId.values()]
-        .map((hit) => ({
-        ...hit,
-        score: (rrfScores.get(hit.id) ?? 0)
-            + lexicalBoost(hit, terms, phrases)
-            + sourceQualityBoost(hit)
-            + metaResultPenalty(query, hit),
-    }))
+        .map((hit) => {
+        const rrfScore = rrfScores.get(hit.id) ?? 0;
+        const lexicalFeatureScore = lexicalBoost(hit, terms, phrases, weights);
+        const sourceQualityScore = sourceQualityBoost(hit, weights);
+        const metaPenaltyScore = metaResultPenalty(query, hit, weights);
+        return {
+            ...hit,
+            rrfScore,
+            lexicalFeatureScore,
+            sourceQualityScore,
+            metaPenaltyScore,
+            score: rrfScore + lexicalFeatureScore + sourceQualityScore + metaPenaltyScore,
+        };
+    })
         .sort((a, b) => b.score - a.score
         || b.textScore - a.textScore
         || b.vectorScore - a.vectorScore
@@ -417,6 +457,15 @@ function formatRecall(query, hits, settings, hindsightStatus, usedHindsightSpans
             vectorScore: hit.vectorScore,
             textScore: hit.textScore,
             backend: hit.backend,
+            diagnostics: {
+                vectorRank: hit.vectorRank,
+                looseLexicalRank: hit.looseLexicalRank,
+                strictLexicalRank: hit.strictLexicalRank,
+                rrfScore: hit.rrfScore,
+                lexicalFeatureScore: hit.lexicalFeatureScore,
+                sourceQualityScore: hit.sourceQualityScore,
+                metaPenaltyScore: hit.metaPenaltyScore,
+            },
             snippet: compactText(hit.text, 1000),
             citation: `${hit.relPath}#L${hit.startLine}${hit.endLine && hit.endLine !== hit.startLine ? `-L${hit.endLine}` : ""}`,
         })),
@@ -432,6 +481,18 @@ export default defineToolPlugin({
         hindsightBaseUrl: Type.Optional(Type.String({ description: "Hindsight API base URL." })),
         hindsightBankId: Type.Optional(Type.String({ description: "Hindsight bank id." })),
         hindsightTimeoutMs: Type.Optional(Type.Number({ description: "Hindsight recall timeout in milliseconds." })),
+        rankingWeights: Type.Optional(Type.Object({
+            vectorRrf: Type.Optional(Type.Number()),
+            looseLexicalRrf: Type.Optional(Type.Number()),
+            strictLexicalRrf: Type.Optional(Type.Number()),
+            distinctiveTerm: Type.Optional(Type.Number()),
+            phrase: Type.Optional(Type.Number()),
+            allDistinctiveTerms: Type.Optional(Type.Number()),
+            currentSource: Type.Optional(Type.Number()),
+            memorySource: Type.Optional(Type.Number()),
+            dailyMemorySource: Type.Optional(Type.Number()),
+            metaResultPenalty: Type.Optional(Type.Number()),
+        })),
     }),
     tools: (tool) => [
         tool({
@@ -454,6 +515,15 @@ export default defineToolPlugin({
                     vectorScore: Type.Number(),
                     textScore: Type.Number(),
                     backend: Type.String(),
+                    diagnostics: Type.Optional(Type.Object({
+                        vectorRank: Type.Optional(Type.Number()),
+                        looseLexicalRank: Type.Optional(Type.Number()),
+                        strictLexicalRank: Type.Optional(Type.Number()),
+                        rrfScore: Type.Optional(Type.Number()),
+                        lexicalFeatureScore: Type.Optional(Type.Number()),
+                        sourceQualityScore: Type.Optional(Type.Number()),
+                        metaPenaltyScore: Type.Optional(Type.Number()),
+                    })),
                     snippet: Type.String(),
                     citation: Type.String(),
                 })),
@@ -465,13 +535,13 @@ export default defineToolPlugin({
                 const [hindsightResult, looseTextHits, strictTextHits] = await Promise.all([
                     searchHindsightSpanIds(settings, query, candidateLimit),
                     searchPostgres(settings, query, candidateLimit, "loose"),
-                    searchPostgres(settings, query, candidateLimit, "strict").catch(() => []),
+                    searchPostgres(settings, query, candidateLimit, "strict"),
                 ]);
                 const hindsightHits = await fetchPostgresSpansByIds(settings, hindsightResult.candidates).catch(() => []);
                 const hindsightStatus = hindsightResult.unavailable
                     ? `unavailable (${hindsightResult.unavailable})`
                     : `ok (${hindsightHits.length} span${hindsightHits.length === 1 ? "" : "s"})`;
-                return formatRecall(query, mergeHits(hindsightHits, looseTextHits, strictTextHits, query, requestedLimit), settings, hindsightStatus, hindsightHits.length > 0);
+                return formatRecall(query, mergeHits(hindsightHits, looseTextHits, strictTextHits, query, requestedLimit, settings.rankingWeights), settings, hindsightStatus, hindsightHits.length > 0);
             },
         }),
     ],

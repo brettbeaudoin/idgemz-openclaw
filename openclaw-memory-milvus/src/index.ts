@@ -13,6 +13,20 @@ type PluginConfig = {
   hindsightBaseUrl?: string;
   hindsightBankId?: string;
   hindsightTimeoutMs?: number;
+  rankingWeights?: Partial<RankingWeights>;
+};
+
+type RankingWeights = {
+  vectorRrf: number;
+  looseLexicalRrf: number;
+  strictLexicalRrf: number;
+  distinctiveTerm: number;
+  phrase: number;
+  allDistinctiveTerms: number;
+  currentSource: number;
+  memorySource: number;
+  dailyMemorySource: number;
+  metaResultPenalty: number;
 };
 
 type SearchHit = {
@@ -27,6 +41,13 @@ type SearchHit = {
   textScore: number;
   score: number;
   backend: "postgres" | "hindsight" | "hybrid";
+  vectorRank?: number;
+  looseLexicalRank?: number;
+  strictLexicalRank?: number;
+  rrfScore?: number;
+  lexicalFeatureScore?: number;
+  sourceQualityScore?: number;
+  metaPenaltyScore?: number;
 };
 
 type TextSearchMode = "loose" | "strict";
@@ -44,6 +65,19 @@ const DEFAULT_HINDSIGHT_BANK_ID = "openclaw-v1";
 const DEFAULT_HINDSIGHT_TIMEOUT_MS = 2500;
 const RRF_K = 60;
 const DUPLICATE_LINE_WINDOW = 2;
+const TOKEN_PATTERN = /[\p{L}\p{N}]+(?:[-_/][\p{L}\p{N}]+)*/gu;
+const DEFAULT_RANKING_WEIGHTS: RankingWeights = {
+  vectorRrf: 0.8,
+  looseLexicalRrf: 1,
+  strictLexicalRrf: 1.6,
+  distinctiveTerm: 0.06,
+  phrase: 0.03,
+  allDistinctiveTerms: 0.015,
+  currentSource: 0.015,
+  memorySource: 0.01,
+  dailyMemorySource: 0.012,
+  metaResultPenalty: -0.05,
+};
 const SPAN_ID_PATTERN = /\b(?:Postgres\s+span\s+(?:UUID|ID)|memory_span(?:\.id)?|span_id)\s*:\s*([a-f0-9]{40})\b/gi;
 const QUERY_STOP_TERMS = new Set([
   "a", "an", "are", "as", "at", "be", "by", "do", "does", "for", "from", "had", "has", "have", "how", "in",
@@ -84,6 +118,7 @@ function resolveSettings(config: PluginConfig = {}) {
     hindsightBankId: config.hindsightBankId || process.env.HINDSIGHT_BANK_ID || fileEnv.HINDSIGHT_BANK_ID || DEFAULT_HINDSIGHT_BANK_ID,
     hindsightApiKey: process.env.HINDSIGHT_API_KEY || fileEnv.HINDSIGHT_API_KEY || "",
     hindsightTimeoutMs: Math.max(250, Number(config.hindsightTimeoutMs || process.env.HINDSIGHT_TIMEOUT_MS || fileEnv.HINDSIGHT_TIMEOUT_MS || DEFAULT_HINDSIGHT_TIMEOUT_MS)),
+    rankingWeights: { ...DEFAULT_RANKING_WEIGHTS, ...(config.rankingWeights ?? {}) },
   };
 }
 
@@ -105,11 +140,15 @@ function normalizePath(absPath: string | undefined, relPath: string): string {
 }
 
 function normalizeSearchText(text: string): string {
-  return text.toLowerCase().replace(/[^a-z0-9_-]+/g, " ").replace(/\s+/g, " ").trim();
+  return tokenizeText(text).join(" ");
+}
+
+function tokenizeText(text: string): string[] {
+  return [...text.toLocaleLowerCase().matchAll(TOKEN_PATTERN)].map((match) => match[0]);
 }
 
 export function tokenizeQuery(query: string): string[] {
-  return [...new Set(query.toLowerCase().match(/[a-z0-9][a-z0-9_-]{1,}/g) ?? [])]
+  return [...new Set(tokenizeText(query))]
     .map((term) => term.replace(/'/g, ""));
 }
 
@@ -268,8 +307,8 @@ function extractSpanIdsFromMetadata(metadata: Record<string, unknown> | undefine
 function evidenceOverlapBoost(spanText: string, evidenceText: string): number {
   const terms = distinctiveTerms(evidenceText);
   if (terms.length === 0) return 0;
-  const haystack = normalizeSearchText(spanText);
-  const matched = terms.filter((term) => haystack.includes(term)).length;
+  const haystack = new Set(tokenizeText(spanText));
+  const matched = terms.filter((term) => haystack.has(term)).length;
   return Math.min(0.5, (matched / terms.length) * 0.5);
 }
 
@@ -353,28 +392,40 @@ function reciprocalRank(rank: number, weight: number): number {
   return weight / (RRF_K + rank);
 }
 
-function sourceQualityBoost(hit: SearchHit): number {
-  if (hit.relPath === "CURRENT.md") return 0.05;
-  if (hit.relPath === "MEMORY.md") return 0.03;
-  if (/^memory\/\d{4}-\d{2}-\d{2}\.md$/.test(hit.relPath)) return 0.04;
+function sourceQualityBoost(hit: SearchHit, weights: RankingWeights): number {
+  if (hit.relPath === "CURRENT.md") return weights.currentSource;
+  if (hit.relPath === "MEMORY.md") return weights.memorySource;
+  if (/^memory\/\d{4}-\d{2}-\d{2}\.md$/.test(hit.relPath)) return weights.dailyMemorySource;
   return 0;
 }
 
-function metaResultPenalty(query: string, hit: SearchHit): number {
+function metaResultPenalty(query: string, hit: SearchHit, weights: RankingWeights): number {
   const normalizedQuery = normalizeSearchText(query);
   if (/\b(benchmark|test|query|ranking|ranker|evaluation|eval)\b/.test(normalizedQuery)) return 0;
   const normalizedHit = normalizeSearchText(hit.text);
-  return /\b(benchmark|query set|missed the|tuning target|hit@|mrr)\b/.test(normalizedHit) ? -0.25 : 0;
+  return /\b(benchmark|query set|missed the|tuning target|hit@|mrr)\b/.test(normalizedHit) ? weights.metaResultPenalty : 0;
 }
 
-function lexicalBoost(hit: SearchHit, terms: string[], phrases: string[]): number {
-  const haystack = normalizeSearchText(`${hit.relPath} ${hit.text}`);
-  const matchedTerms = terms.filter((term) => haystack.includes(term)).length;
+function phraseMatches(tokens: string[], phrase: string): boolean {
+  const phraseTokens = phrase.split(" ");
+  if (phraseTokens.length === 0 || tokens.length < phraseTokens.length) return false;
+  for (let index = 0; index <= tokens.length - phraseTokens.length; index += 1) {
+    if (phraseTokens.every((token, offset) => tokens[index + offset] === token)) return true;
+  }
+  return false;
+}
+
+function lexicalBoost(hit: SearchHit, terms: string[], phrases: string[], weights: RankingWeights): number {
+  const haystackTokens = tokenizeText(`${hit.relPath} ${hit.text}`);
+  const haystack = new Set(haystackTokens);
+  const matchedTerms = terms.filter((term) => haystack.has(term)).length;
   const coverage = terms.length > 0 ? matchedTerms / terms.length : 0;
-  const matchedPhrases = phrases.filter((phrase) => haystack.includes(phrase)).length;
+  const matchedPhrases = phrases.filter((phrase) => phraseMatches(haystackTokens, phrase)).length;
   const phraseCoverage = phrases.length > 0 ? matchedPhrases / phrases.length : 0;
   const allDistinctiveTermsMatched = terms.length > 0 && matchedTerms === terms.length;
-  return (coverage * 0.6) + (phraseCoverage * 0.25) + (allDistinctiveTermsMatched ? 0.15 : 0);
+  return (coverage * weights.distinctiveTerm)
+    + (phraseCoverage * weights.phrase)
+    + (allDistinctiveTermsMatched ? weights.allDistinctiveTerms : 0);
 }
 
 function collapseNearbyDuplicates(hits: SearchHit[], limit: number): SearchHit[] {
@@ -397,6 +448,7 @@ export function mergeHits(
   strictTextHits: SearchHit[],
   query: string,
   limit: number,
+  weights: RankingWeights = DEFAULT_RANKING_WEIGHTS,
 ): SearchHit[] {
   const byId = new Map<string, SearchHit>();
   const maxVector = Math.max(1, ...vectorHits.map((hit) => hit.vectorScore));
@@ -405,36 +457,46 @@ export function mergeHits(
   const terms = distinctiveTerms(query);
   const phrases = queryPhrases(query);
 
-  const addHit = (hit: SearchHit, rank: number, weight: number, normalizedScores: Partial<SearchHit>) => {
+  const addHit = (hit: SearchHit, rank: number, weight: number, normalizedScores: Partial<SearchHit>, rankField: "vectorRank" | "looseLexicalRank" | "strictLexicalRank") => {
     const existing = byId.get(hit.id);
     if (existing) {
       existing.vectorScore = Math.max(existing.vectorScore, normalizedScores.vectorScore ?? 0);
       existing.textScore = Math.max(existing.textScore, normalizedScores.textScore ?? 0);
-      existing.backend = "hybrid";
+      existing[rankField] = Math.min(existing[rankField] ?? rank, rank);
+      if ((existing.vectorRank || rankField === "vectorRank") && (existing.looseLexicalRank || existing.strictLexicalRank || rankField !== "vectorRank")) {
+        existing.backend = "hybrid";
+      }
     } else {
-      byId.set(hit.id, { ...hit, ...normalizedScores });
+      byId.set(hit.id, { ...hit, ...normalizedScores, [rankField]: rank });
     }
     rrfScores.set(hit.id, (rrfScores.get(hit.id) ?? 0) + reciprocalRank(rank, weight));
   };
 
   for (const [index, hit] of vectorHits.entries()) {
-    addHit(hit, index + 1, 0.8, { vectorScore: hit.vectorScore / maxVector, textScore: 0 });
+    addHit(hit, index + 1, weights.vectorRrf, { vectorScore: hit.vectorScore / maxVector, textScore: 0 }, "vectorRank");
   }
   for (const [index, hit] of looseTextHits.entries()) {
-    addHit(hit, index + 1, 1.0, { vectorScore: 0, textScore: hit.textScore / maxText });
+    addHit(hit, index + 1, weights.looseLexicalRrf, { vectorScore: 0, textScore: hit.textScore / maxText }, "looseLexicalRank");
   }
   for (const [index, hit] of strictTextHits.entries()) {
-    addHit(hit, index + 1, 1.6, { vectorScore: 0, textScore: hit.textScore / maxText });
+    addHit(hit, index + 1, weights.strictLexicalRrf, { vectorScore: 0, textScore: hit.textScore / maxText }, "strictLexicalRank");
   }
 
   const ranked = [...byId.values()]
-    .map((hit) => ({
-      ...hit,
-      score: (rrfScores.get(hit.id) ?? 0)
-        + lexicalBoost(hit, terms, phrases)
-        + sourceQualityBoost(hit)
-        + metaResultPenalty(query, hit),
-    }))
+    .map((hit) => {
+      const rrfScore = rrfScores.get(hit.id) ?? 0;
+      const lexicalFeatureScore = lexicalBoost(hit, terms, phrases, weights);
+      const sourceQualityScore = sourceQualityBoost(hit, weights);
+      const metaPenaltyScore = metaResultPenalty(query, hit, weights);
+      return {
+        ...hit,
+        rrfScore,
+        lexicalFeatureScore,
+        sourceQualityScore,
+        metaPenaltyScore,
+        score: rrfScore + lexicalFeatureScore + sourceQualityScore + metaPenaltyScore,
+      };
+    })
     .sort((a, b) =>
       b.score - a.score
       || b.textScore - a.textScore
@@ -484,12 +546,21 @@ function formatRecall(
       path: hit.relPath,
       startLine: hit.startLine,
       endLine: hit.endLine,
-      score: hit.score,
-      vectorScore: hit.vectorScore,
-      textScore: hit.textScore,
-      backend: hit.backend,
-      snippet: compactText(hit.text, 1000),
-      citation: `${hit.relPath}#L${hit.startLine}${hit.endLine && hit.endLine !== hit.startLine ? `-L${hit.endLine}` : ""}`,
+        score: hit.score,
+        vectorScore: hit.vectorScore,
+        textScore: hit.textScore,
+        backend: hit.backend,
+        diagnostics: {
+          vectorRank: hit.vectorRank,
+          looseLexicalRank: hit.looseLexicalRank,
+          strictLexicalRank: hit.strictLexicalRank,
+          rrfScore: hit.rrfScore,
+          lexicalFeatureScore: hit.lexicalFeatureScore,
+          sourceQualityScore: hit.sourceQualityScore,
+          metaPenaltyScore: hit.metaPenaltyScore,
+        },
+        snippet: compactText(hit.text, 1000),
+        citation: `${hit.relPath}#L${hit.startLine}${hit.endLine && hit.endLine !== hit.startLine ? `-L${hit.endLine}` : ""}`,
     })),
   };
 }
@@ -504,6 +575,18 @@ export default defineToolPlugin({
     hindsightBaseUrl: Type.Optional(Type.String({ description: "Hindsight API base URL." })),
     hindsightBankId: Type.Optional(Type.String({ description: "Hindsight bank id." })),
     hindsightTimeoutMs: Type.Optional(Type.Number({ description: "Hindsight recall timeout in milliseconds." })),
+    rankingWeights: Type.Optional(Type.Object({
+      vectorRrf: Type.Optional(Type.Number()),
+      looseLexicalRrf: Type.Optional(Type.Number()),
+      strictLexicalRrf: Type.Optional(Type.Number()),
+      distinctiveTerm: Type.Optional(Type.Number()),
+      phrase: Type.Optional(Type.Number()),
+      allDistinctiveTerms: Type.Optional(Type.Number()),
+      currentSource: Type.Optional(Type.Number()),
+      memorySource: Type.Optional(Type.Number()),
+      dailyMemorySource: Type.Optional(Type.Number()),
+      metaResultPenalty: Type.Optional(Type.Number()),
+    })),
   }),
   tools: (tool) => [
     tool({
@@ -526,6 +609,15 @@ export default defineToolPlugin({
           vectorScore: Type.Number(),
           textScore: Type.Number(),
           backend: Type.String(),
+          diagnostics: Type.Optional(Type.Object({
+            vectorRank: Type.Optional(Type.Number()),
+            looseLexicalRank: Type.Optional(Type.Number()),
+            strictLexicalRank: Type.Optional(Type.Number()),
+            rrfScore: Type.Optional(Type.Number()),
+            lexicalFeatureScore: Type.Optional(Type.Number()),
+            sourceQualityScore: Type.Optional(Type.Number()),
+            metaPenaltyScore: Type.Optional(Type.Number()),
+          })),
           snippet: Type.String(),
           citation: Type.String(),
         })),
@@ -537,7 +629,7 @@ export default defineToolPlugin({
         const [hindsightResult, looseTextHits, strictTextHits] = await Promise.all([
           searchHindsightSpanIds(settings, query, candidateLimit),
           searchPostgres(settings, query, candidateLimit, "loose"),
-          searchPostgres(settings, query, candidateLimit, "strict").catch(() => []),
+          searchPostgres(settings, query, candidateLimit, "strict"),
         ]);
         const hindsightHits = await fetchPostgresSpansByIds(settings, hindsightResult.candidates).catch(() => []);
         const hindsightStatus = hindsightResult.unavailable
@@ -545,7 +637,7 @@ export default defineToolPlugin({
           : `ok (${hindsightHits.length} span${hindsightHits.length === 1 ? "" : "s"})`;
         return formatRecall(
           query,
-          mergeHits(hindsightHits, looseTextHits, strictTextHits, query, requestedLimit),
+          mergeHits(hindsightHits, looseTextHits, strictTextHits, query, requestedLimit, settings.rankingWeights),
           settings,
           hindsightStatus,
           hindsightHits.length > 0,

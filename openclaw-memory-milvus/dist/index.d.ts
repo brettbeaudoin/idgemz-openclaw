@@ -1,3 +1,15 @@
+type RankingWeights = {
+    vectorRrf: number;
+    looseLexicalRrf: number;
+    strictLexicalRrf: number;
+    distinctiveTerm: number;
+    phrase: number;
+    allDistinctiveTerms: number;
+    currentSource: number;
+    memorySource: number;
+    dailyMemorySource: number;
+    metaResultPenalty: number;
+};
 type SearchHit = {
     id: string;
     relPath: string;
@@ -10,9 +22,16 @@ type SearchHit = {
     textScore: number;
     score: number;
     backend: "postgres" | "hindsight" | "hybrid";
+    vectorRank?: number;
+    looseLexicalRank?: number;
+    strictLexicalRank?: number;
+    rrfScore?: number;
+    lexicalFeatureScore?: number;
+    sourceQualityScore?: number;
+    metaPenaltyScore?: number;
 };
 export declare function tokenizeQuery(query: string): string[];
 export declare function extractSpanIdsFromHindsightResponse(payload: unknown): string[];
-export declare function mergeHits(vectorHits: SearchHit[], looseTextHits: SearchHit[], strictTextHits: SearchHit[], query: string, limit: number): SearchHit[];
+export declare function mergeHits(vectorHits: SearchHit[], looseTextHits: SearchHit[], strictTextHits: SearchHit[], query: string, limit: number, weights?: RankingWeights): SearchHit[];
 declare const _default: import("openclaw/plugin-sdk/tool-plugin").DefinedToolPluginEntry;
 export default _default;

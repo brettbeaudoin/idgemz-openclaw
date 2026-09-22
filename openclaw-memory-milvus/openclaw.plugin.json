@@ -25,6 +25,41 @@
       "hindsightTimeoutMs": {
         "type": "number",
         "description": "Hindsight recall timeout in milliseconds."
+      },
+      "rankingWeights": {
+        "type": "object",
+        "properties": {
+          "vectorRrf": {
+            "type": "number"
+          },
+          "looseLexicalRrf": {
+            "type": "number"
+          },
+          "strictLexicalRrf": {
+            "type": "number"
+          },
+          "distinctiveTerm": {
+            "type": "number"
+          },
+          "phrase": {
+            "type": "number"
+          },
+          "allDistinctiveTerms": {
+            "type": "number"
+          },
+          "currentSource": {
+            "type": "number"
+          },
+          "memorySource": {
+            "type": "number"
+          },
+          "dailyMemorySource": {
+            "type": "number"
+          },
+          "metaResultPenalty": {
+            "type": "number"
+          }
+        }
       }
     }
   },
