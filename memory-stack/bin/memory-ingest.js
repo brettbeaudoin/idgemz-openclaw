@@ -374,6 +374,14 @@ async function upsertHindsightOutbox(pool, source) {
            WHEN memory_outbox.content_sha256 = excluded.content_sha256 THEN memory_outbox.status
            ELSE 'pending'
          END,
+         hindsight_operation_id = CASE
+           WHEN memory_outbox.content_sha256 = excluded.content_sha256 THEN memory_outbox.hindsight_operation_id
+           ELSE NULL
+         END,
+         last_error = CASE
+           WHEN memory_outbox.content_sha256 = excluded.content_sha256 THEN memory_outbox.last_error
+           ELSE NULL
+         END,
          updated_at = CASE
            WHEN memory_outbox.content_sha256 = excluded.content_sha256 THEN memory_outbox.updated_at
            ELSE now()
@@ -419,24 +427,140 @@ function hindsightRetainContent(source) {
   ].join('\n');
 }
 
+async function reconcileHindsightOutbox(pool, baseUrl, bankId, headers) {
+  // Pre-operation-id rows are legacy state from before client-supplied IDs. They
+  // cannot be reconciled safely, so return them to the normal submit path once.
+  await pool.query(
+    `UPDATE memory_outbox
+     SET status = 'pending', last_error = 'legacy queued retain without operation id', updated_at = now()
+     WHERE target = 'hindsight' AND status = 'queued' AND hindsight_operation_id IS NULL`
+  );
+  const queued = await pool.query(
+    `SELECT DISTINCT document_id, hindsight_operation_id AS operation_id
+     FROM memory_outbox
+     WHERE target = 'hindsight' AND status = 'queued'
+       AND hindsight_operation_id IS NOT NULL`
+  );
+
+  for (const { document_id: documentId, operation_id: operationId } of queued.rows) {
+    const newerRevision = await pool.query(
+      `SELECT EXISTS(
+         SELECT 1 FROM memory_outbox
+         WHERE target = 'hindsight' AND document_id = $1 AND status = 'pending'
+       ) AS pending`,
+      [documentId]
+    );
+    const hasNewerRevision = newerRevision.rows[0].pending;
+
+    const statusResponse = await fetch(
+      `${baseUrl}/v1/default/banks/${encodeURIComponent(bankId)}/operations/${encodeURIComponent(operationId)}`,
+      { headers }
+    );
+    if (!statusResponse.ok && statusResponse.status !== 404) {
+      const body = await statusResponse.text();
+      await pool.query(
+        `UPDATE memory_outbox
+         SET last_error = $3, updated_at = now()
+         WHERE target = 'hindsight' AND document_id = $1 AND status = 'queued'
+           AND hindsight_operation_id = $2`,
+        [documentId, operationId, `Hindsight status HTTP ${statusResponse.status} ${body.slice(0, 1000)}`]
+      );
+      continue;
+    }
+    const operation = statusResponse.ok ? await statusResponse.json() : { status: 'not_found' };
+    if (operation.status === 'completed') {
+      await pool.query(
+        `UPDATE memory_outbox
+         SET status = 'sent', last_error = null, updated_at = now()
+         WHERE target = 'hindsight' AND document_id = $1 AND status = 'queued'
+           AND hindsight_operation_id = $2`,
+        [documentId, operationId]
+      );
+    } else if (operation.status === 'failed') {
+      if (hasNewerRevision) {
+        // Never retry a stale replace after a newer source revision is waiting:
+        // it could overwrite the newer document after that revision completes.
+        await pool.query(
+          `UPDATE memory_outbox
+           SET status = 'sent', last_error = 'superseded failed Hindsight operation', updated_at = now()
+           WHERE target = 'hindsight' AND document_id = $1 AND status = 'queued'
+             AND hindsight_operation_id = $2`,
+          [documentId, operationId]
+        );
+        continue;
+      }
+      const retryResponse = await fetch(
+        `${baseUrl}/v1/default/banks/${encodeURIComponent(bankId)}/operations/${encodeURIComponent(operationId)}/retry`,
+        { method: 'POST', headers }
+      );
+      if (retryResponse.ok) {
+        await pool.query(
+          `UPDATE memory_outbox
+           SET attempts = attempts + 1, last_error = null, updated_at = now()
+           WHERE target = 'hindsight' AND document_id = $1 AND status = 'queued'
+             AND hindsight_operation_id = $2`,
+          [documentId, operationId]
+        );
+      } else {
+        const body = await retryResponse.text();
+        await pool.query(
+          `UPDATE memory_outbox
+           SET last_error = $3, updated_at = now()
+           WHERE target = 'hindsight' AND document_id = $1 AND status = 'queued'
+             AND hindsight_operation_id = $2`,
+          [documentId, operationId, `Hindsight retry HTTP ${retryResponse.status} ${body.slice(0, 1000)}`]
+        );
+      }
+    } else if (operation.status === 'cancelled' || operation.status === 'not_found') {
+      await pool.query(
+        `UPDATE memory_outbox
+         SET status = $3, hindsight_operation_id = null, attempts = attempts + 1,
+             last_error = $4, updated_at = now()
+         WHERE target = 'hindsight' AND document_id = $1 AND status = 'queued'
+           AND hindsight_operation_id = $2`,
+        [documentId, operationId, hasNewerRevision ? 'sent' : 'pending', `Hindsight operation ${operation.status}`]
+      );
+    }
+  }
+}
+
 async function retainInHindsight(pool, sources) {
   const baseUrl = (process.env.HINDSIGHT_BASE_URL || 'http://localhost:8888').replace(/\/+$/, '');
   const bankId = process.env.HINDSIGHT_BANK_ID || 'openclaw-v1';
   const headers = { 'content-type': 'application/json' };
   if (process.env.HINDSIGHT_API_KEY) headers.authorization = `Bearer ${process.env.HINDSIGHT_API_KEY}`;
 
+  await reconcileHindsightOutbox(pool, baseUrl, bankId, headers);
+
   let retained = 0;
   const pending = await pool.query(
     `SELECT DISTINCT document_id
-     FROM memory_outbox
-     WHERE target = 'hindsight'
-       AND (
-         status = 'pending'
-         OR (status = 'queued' AND updated_at < now() - interval '12 hours')
+     FROM memory_outbox AS candidate
+     WHERE candidate.target = 'hindsight'
+       AND candidate.status = 'pending'
+       AND NOT EXISTS (
+         SELECT 1 FROM memory_outbox AS active
+         WHERE active.target = 'hindsight'
+           AND active.document_id = candidate.document_id
+           AND active.status = 'queued'
        )`
   );
   const pendingDocuments = new Set(pending.rows.map((row) => row.document_id));
   for (const source of sources.filter((source) => pendingDocuments.has(`file:${source.relPath}`))) {
+    const operationId = boolEnv('HINDSIGHT_RETAIN_ASYNC', true) ? crypto.randomUUID() : null;
+    // Claim the source before POSTing. The caller-supplied UUID makes a lost HTTP
+    // acknowledgement safe: the next run polls/reuses this operation instead of
+    // enqueueing another retain job.
+    const claim = await pool.query(
+      `UPDATE memory_outbox
+       SET status = $2, hindsight_operation_id = $3, attempts = attempts + 1,
+           last_error = null, updated_at = now()
+       WHERE target = 'hindsight' AND document_id = $1 AND status = 'pending'
+       RETURNING id`,
+      [`file:${source.relPath}`, operationId ? 'queued' : 'pending', operationId]
+    );
+    if (claim.rowCount === 0) continue;
+
     const payload = {
       items: [{
         content: hindsightRetainContent(source),
@@ -461,7 +585,8 @@ async function retainInHindsight(pool, sources) {
         ],
         observation_scopes: [['workspace:clawd']]
       }],
-      async: boolEnv('HINDSIGHT_RETAIN_ASYNC', true)
+      async: Boolean(operationId),
+      operation_id: operationId
     };
 
     const response = await fetch(`${baseUrl}/v1/default/banks/${encodeURIComponent(bankId)}/memories`, {
@@ -469,25 +594,42 @@ async function retainInHindsight(pool, sources) {
       headers,
       body: JSON.stringify(payload)
     });
+    const body = await response.text();
     if (!response.ok) {
-      const body = await response.text();
+      const definitiveRejection = response.status >= 400 && response.status < 500;
       await pool.query(
-        `UPDATE memory_outbox
-         SET attempts = attempts + 1, last_error = $2, updated_at = now()
-         WHERE target = 'hindsight'
-           AND document_id = $1`,
-        [`file:${source.relPath}`, `HTTP ${response.status} ${body.slice(0, 1000)}`]
+        definitiveRejection
+          ? `UPDATE memory_outbox
+             SET status = 'pending', hindsight_operation_id = null, last_error = $3, updated_at = now()
+             WHERE target = 'hindsight' AND document_id = $1 AND status = 'queued'
+               AND hindsight_operation_id = $2`
+          : `UPDATE memory_outbox
+             SET last_error = $3, updated_at = now()
+             WHERE target = 'hindsight' AND document_id = $1 AND status = 'queued'
+               AND hindsight_operation_id = $2`,
+        [`file:${source.relPath}`, operationId, `HTTP ${response.status} ${body.slice(0, 1000)}`]
       );
       throw new Error(`Hindsight retain failed for ${source.relPath}: HTTP ${response.status} ${body.slice(0, 1000)}`);
+    }
+    const accepted = JSON.parse(body);
+    if (payload.async && accepted.operation_id && accepted.operation_id !== operationId) {
+      throw new Error(`Hindsight retain for ${source.relPath} returned an unexpected operation id`);
+    }
+    if (payload.async && !accepted.operation_id) {
+      throw new Error(`Hindsight retain for ${source.relPath} was accepted without an operation id`);
     }
     retained += 1;
     await pool.query(
       `UPDATE memory_outbox
-       SET status = $2, attempts = attempts + 1, last_error = null, updated_at = now()
+       SET status = $2, hindsight_operation_id = $3, attempts = attempts + 1,
+           last_error = null, updated_at = now()
        WHERE target = 'hindsight'
          AND document_id = $1
-         AND status IN ('pending', 'queued')`,
-      [`file:${source.relPath}`, payload.async ? 'queued' : 'sent']
+         AND (
+           (status = 'queued' AND hindsight_operation_id = $3)
+           OR (status = 'pending' AND $3 IS NULL)
+         )`,
+      [`file:${source.relPath}`, payload.async ? 'queued' : 'sent', operationId]
     );
   }
   return retained;
@@ -525,6 +667,7 @@ async function main() {
     connectionString: process.env.MEMORY_DATABASE_URL || 'postgresql://openclaw_memory:openclaw_memory_dev_password@localhost:55432/openclaw_memory'
   });
   try {
+    await pool.query('ALTER TABLE memory_outbox ADD COLUMN IF NOT EXISTS hindsight_operation_id text');
     const mode = ['apply', retain && 'retain-hindsight'].filter(Boolean).join('+');
     const manifest = await writeManifest(pool, sources, mode);
     console.log(`Manifest changed ${manifest.changedSources} source(s), skipped ${manifest.skippedSources} unchanged source(s), deleted ${manifest.deletedSources} missing source(s), pruned ${manifest.obsoleteOutboxRows} obsolete outbox row(s).`);

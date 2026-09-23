@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS memory_outbox (
   target text NOT NULL CHECK (target IN ('hindsight')),
   content_sha256 text NOT NULL,
   status text NOT NULL DEFAULT 'pending',
+  hindsight_operation_id text,
   attempts integer NOT NULL DEFAULT 0,
   last_error text,
   created_at timestamptz NOT NULL DEFAULT now(),

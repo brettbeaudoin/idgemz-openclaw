@@ -47,8 +47,6 @@ services:
     depends_on:
       hindsight-db:
         condition: service_healthy
-      tei:
-        condition: service_started
     ports:
       - "${HINDSIGHT_API_PORT:-8888}:8888"
       - "${HINDSIGHT_DASHBOARD_PORT:-9999}:9999"
@@ -57,16 +55,22 @@ services:
       HINDSIGHT_API_HOST: "0.0.0.0"
       HINDSIGHT_API_PORT: "8888"
       HINDSIGHT_API_WORKER_ID: ${HINDSIGHT_API_WORKER_ID:-openclaw-hindsight-local}
-      HINDSIGHT_API_WORKER_MAX_SLOTS: ${HINDSIGHT_API_WORKER_MAX_SLOTS:-2}
+      HINDSIGHT_API_WORKER_MAX_SLOTS: ${HINDSIGHT_API_WORKER_MAX_SLOTS:-1}
       HINDSIGHT_API_WORKER_CONSOLIDATION_RESERVED_SLOTS: ${HINDSIGHT_API_WORKER_CONSOLIDATION_RESERVED_SLOTS:-0}
       HINDSIGHT_API_LOG_LEVEL: ${HINDSIGHT_API_LOG_LEVEL:-info}
       HINDSIGHT_API_LLM_PROVIDER: ${HINDSIGHT_API_LLM_PROVIDER:-ollama}
-      HINDSIGHT_API_LLM_MODEL: ${HINDSIGHT_API_LLM_MODEL:-qwen3:8b}
+      # Retain extraction is latency-sensitive; keep the larger local model out of
+      # this asynchronous worker so long documents do not hit the 300s timeout.
+      HINDSIGHT_API_LLM_MODEL: ${HINDSIGHT_API_LLM_MODEL:-qwen3:1.7b}
       HINDSIGHT_API_LLM_BASE_URL: ${HINDSIGHT_API_LLM_BASE_URL:-http://host.docker.internal:11434/v1}
       HINDSIGHT_API_LLM_API_KEY: ${HINDSIGHT_API_LLM_API_KEY:-}
       HINDSIGHT_API_LLM_MAX_CONCURRENT: ${HINDSIGHT_API_LLM_MAX_CONCURRENT:-1}
       HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT: ${HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT:-1}
       HINDSIGHT_API_RETAIN_LLM_TIMEOUT: ${HINDSIGHT_API_RETAIN_LLM_TIMEOUT:-300}
+      # Local Qwen models expose a 4K context; the upstream 64K extraction
+      # default leaves retain calls unable to complete.
+      HINDSIGHT_API_RETAIN_CHUNK_SIZE: ${HINDSIGHT_API_RETAIN_CHUNK_SIZE:-1500}
+      HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS: ${HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS:-2048}
       HINDSIGHT_API_LLM_TRACE_ENABLED: ${HINDSIGHT_API_LLM_TRACE_ENABLED:-false}
       HINDSIGHT_API_RETAIN_EXTRACTION_MODE: ${HINDSIGHT_API_RETAIN_EXTRACTION_MODE:-concise}
       HINDSIGHT_API_FAIL_ON_EXTRACTION_ERRORS: ${HINDSIGHT_API_FAIL_ON_EXTRACTION_ERRORS:-true}
@@ -74,9 +78,14 @@ services:
       HINDSIGHT_API_ENABLE_AUTO_CONSOLIDATION: ${HINDSIGHT_API_ENABLE_AUTO_CONSOLIDATION:-false}
       HINDSIGHT_API_RETAIN_MISSION: "${HINDSIGHT_API_RETAIN_MISSION:-Extract durable facts, decisions, preferences, incidents, lessons, project state, and recurring patterns that would help Dangerboat assist Brett later. Ignore filler, tool noise, and transient status unless it changes future behavior.}"
       HINDSIGHT_API_OBSERVATIONS_MISSION: "${HINDSIGHT_API_OBSERVATIONS_MISSION:-Synthesize durable evidence-grounded beliefs, preferences, operating patterns, project history, and changes over time. Preserve uncertainty and contradictions.}"
-      HINDSIGHT_API_EMBEDDINGS_PROVIDER: ${HINDSIGHT_API_EMBEDDINGS_PROVIDER:-tei}
-      HINDSIGHT_API_EMBEDDINGS_TEI_URL: ${HINDSIGHT_API_EMBEDDINGS_TEI_URL:-http://tei:80}
-      HINDSIGHT_API_EMBEDDINGS_TEI_BATCH_SIZE: ${HINDSIGHT_API_EMBEDDINGS_TEI_BATCH_SIZE:-32}
+      # Native Ollama avoids the amd64-only TEI sidecar, which is OOM-prone under
+      # Docker Desktop's small VM allocation on Apple Silicon. all-minilm is 384d,
+      # matching the existing Hindsight pgvector schema.
+      HINDSIGHT_API_EMBEDDINGS_PROVIDER: ${HINDSIGHT_API_EMBEDDINGS_PROVIDER:-litellm}
+      HINDSIGHT_API_EMBEDDINGS_LITELLM_API_BASE: ${HINDSIGHT_API_EMBEDDINGS_LITELLM_API_BASE:-http://host.docker.internal:11434/v1}
+      HINDSIGHT_API_EMBEDDINGS_LITELLM_MODEL: ${HINDSIGHT_API_EMBEDDINGS_LITELLM_MODEL:-all-minilm:latest}
+      HINDSIGHT_API_EMBEDDINGS_LITELLM_DIMENSIONS: ${HINDSIGHT_API_EMBEDDINGS_LITELLM_DIMENSIONS:-384}
+      HINDSIGHT_API_EMBEDDINGS_MAX_CONCURRENT_REQUESTS: ${HINDSIGHT_API_EMBEDDINGS_MAX_CONCURRENT_REQUESTS:-1}
       HINDSIGHT_API_EMBEDDINGS_ONNX_MODEL_ID: ${HINDSIGHT_API_EMBEDDINGS_ONNX_MODEL_ID:-intfloat/multilingual-e5-small}
       HINDSIGHT_API_EMBEDDINGS_ONNX_FILE: ${HINDSIGHT_API_EMBEDDINGS_ONNX_FILE:-onnx/model.onnx}
       HINDSIGHT_API_EMBEDDINGS_ONNX_DIMENSIONS: ${HINDSIGHT_API_EMBEDDINGS_ONNX_DIMENSIONS:-384}
@@ -92,20 +101,6 @@ services:
       - "host.docker.internal:host-gateway"
     networks: [memory-net]
 
-  tei:
-    image: ghcr.io/huggingface/text-embeddings-inference:cpu-latest
-    platform: ${TEI_PLATFORM:-linux/amd64}
-    container_name: openclaw-tei
-    restart: unless-stopped
-    command:
-      - "--model-id"
-      - "${HINDSIGHT_TEI_MODEL:-intfloat/multilingual-e5-small}"
-    ports:
-      - "${TEI_PORT:-8081}:80"
-    volumes:
-      - tei-data:/data
-    networks: [memory-net]
-
 networks:
   memory-net:
     name: ${OPENCLAW_MEMORY_NETWORK:-openclaw-memory-net}
@@ -114,4 +109,3 @@ volumes:
   memory-postgres-data:
   hindsight-postgres-data:
   hindsight-models:
-  tei-data:
