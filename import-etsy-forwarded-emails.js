@@ -393,6 +393,10 @@ async function main() {
       if (exists) updated++; else imported++;
     }
 
+    // This timestamp is the explicit proof used by the operating brief.  Do
+    // not infer Etsy freshness from an order's date: a zero-order day is still
+    // a successful sync.
+    await pool.query(`UPDATE public.channels SET last_sync_at=now(), updated_at=now() WHERE id=$1`, [etsyChannelId]);
     console.log(`Etsy email import complete: imported=${imported}, updated=${updated}, skipped=${skipped}`);
   } finally {
     await pool.end();
