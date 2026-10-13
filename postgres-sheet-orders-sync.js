@@ -112,55 +112,63 @@ async function ensurePivotSourceCoversOrders({ vals }) {
   const md = await sheets.spreadsheets.get({
     spreadsheetId: SHEET_ID
   });
-  const pivotData = await sheets.spreadsheets.get({
-    spreadsheetId: SHEET_ID,
-    ranges: ['Pivot - Orders!B1'],
-    includeGridData: true
-  });
-
   const ordersSheet = (md.data.sheets || []).find((s) => s?.properties?.title === SHEET_NAME);
-  const pivotSheet = (md.data.sheets || []).find((s) => s?.properties?.title === 'Pivot - Orders');
-  const pivotDataSheet = (pivotData.data.sheets || []).find((s) => s?.properties?.title === 'Pivot - Orders');
-  const pivotCell = pivotDataSheet?.data?.[0]?.rowData?.[0]?.values?.[0];
-  const pivotTable = pivotCell?.pivotTable;
-  if (!ordersSheet || !pivotSheet || !pivotTable?.source) return;
+  if (!ordersSheet) return;
 
   const targetEndRowIndex = Math.max(
     ordersSheet.properties?.gridProperties?.rowCount || 0,
     lastNonEmpty
   );
 
-  if ((pivotTable.source.endRowIndex || 0) >= targetEndRowIndex) return;
+  const pivotTargets = [
+    { title: 'Pivot - Orders', anchorColumnIndex: 1 },
+    { title: 'Rankings', anchorColumnIndex: 1 }
+  ];
 
-  pivotTable.source = {
-    ...pivotTable.source,
-    sheetId: ordersSheet.properties.sheetId,
-    startRowIndex: 15,
-    endRowIndex: targetEndRowIndex,
-    startColumnIndex: 0,
-    endColumnIndex: 3
-  };
+  for (const { title, anchorColumnIndex } of pivotTargets) {
+    const pivotSheet = (md.data.sheets || []).find((s) => s?.properties?.title === title);
+    if (!pivotSheet) continue;
 
-  await sheets.spreadsheets.batchUpdate({
-    spreadsheetId: SHEET_ID,
-    requestBody: {
-      requests: [{
-        updateCells: {
-          range: {
-            sheetId: pivotSheet.properties.sheetId,
-            startRowIndex: 0,
-            endRowIndex: 1,
-            startColumnIndex: 1,
-            endColumnIndex: 2
-          },
-          rows: [{ values: [{ pivotTable }] }],
-          fields: 'pivotTable'
-        }
-      }]
-    }
-  });
+    const pivotData = await sheets.spreadsheets.get({
+      spreadsheetId: SHEET_ID,
+      ranges: [`${title}!${numToCol(anchorColumnIndex + 1)}1`],
+      includeGridData: true
+    });
+    const pivotDataSheet = (pivotData.data.sheets || []).find((s) => s?.properties?.title === title);
+    const pivotCell = pivotDataSheet?.data?.[0]?.rowData?.[0]?.values?.[0];
+    const pivotTable = pivotCell?.pivotTable;
+    if (!pivotTable?.source || (pivotTable.source.endRowIndex || 0) >= targetEndRowIndex) continue;
 
-  console.log(`Expanded Pivot - Orders source through Orders row ${targetEndRowIndex}.`);
+    pivotTable.source = {
+      ...pivotTable.source,
+      sheetId: ordersSheet.properties.sheetId,
+      startRowIndex: 15,
+      endRowIndex: targetEndRowIndex,
+      startColumnIndex: 0,
+      endColumnIndex: 3
+    };
+
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SHEET_ID,
+      requestBody: {
+        requests: [{
+          updateCells: {
+            range: {
+              sheetId: pivotSheet.properties.sheetId,
+              startRowIndex: 0,
+              endRowIndex: 1,
+              startColumnIndex: anchorColumnIndex,
+              endColumnIndex: anchorColumnIndex + 1
+            },
+            rows: [{ values: [{ pivotTable }] }],
+            fields: 'pivotTable'
+          }
+        }]
+      }
+    });
+
+    console.log(`Expanded ${title} source through Orders row ${targetEndRowIndex}.`);
+  }
 }
 
 function numToCol(n) {
