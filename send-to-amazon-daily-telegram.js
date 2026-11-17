@@ -11,6 +11,7 @@ require('dotenv').config({ path: require('path').resolve(__dirname, '.env.local'
 require('dotenv').config({ path: require('path').resolve(__dirname, '.env') });
 
 const fs = require('fs');
+const https = require('https');
 const path = require('path');
 const { Pool } = require('pg');
 const { SellingPartner } = require('amazon-sp-api');
@@ -84,7 +85,16 @@ function getAllowedAttachmentDir() {
     || path.join('/tmp', 'openclaw', 'idgemz');
 }
 
-function sendTelegramWithAttachment({ channel, target, caption, attachmentPath }) {
+function isRetryableTelegramSendError(message) {
+  if (/Sent via telegram|Message ID/i.test(message)) return false;
+  return /Network request for 'sendDocument' failed|fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up/i.test(message);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function sendTelegramWithAttachment({ channel, target, caption, attachmentPath }, { retries = 2, retryDelayMs = 30000 } = {}) {
   const args = [
     'message', 'send',
     '--channel', channel,
@@ -94,25 +104,89 @@ function sendTelegramWithAttachment({ channel, target, caption, attachmentPath }
     '--force-document'
   ];
 
-  const result = spawnSync('openclaw', args, {
-    encoding: 'utf8',
-    timeout: 180000
-  });
+  let lastError = '';
 
-  if (result.stdout) process.stdout.write(result.stdout);
-  if (result.stderr) process.stderr.write(result.stderr);
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const result = spawnSync('openclaw', args, {
+      encoding: 'utf8',
+      timeout: TELEGRAM_SEND_TIMEOUT_MS
+    });
 
-  if (result.status !== 0) {
+    if (result.stdout) process.stdout.write(result.stdout);
+    if (result.stderr) process.stderr.write(result.stderr);
+
+    if (result.status === 0) {
+      return { mode: 'attachment', attempts: attempt + 1 };
+    }
+
     const combined = `${result.stdout || ''}\n${result.stderr || ''}`.trim();
-    throw new Error(combined || `openclaw message send failed with status ${result.status}`);
+    const statusText = result.status == null
+      ? `signal ${result.signal || 'unknown'}`
+      : `status ${result.status}`;
+    lastError = result.error?.stack || result.error?.message || combined || `openclaw message send failed with ${statusText}`;
+
+    if (attempt >= retries || !isRetryableTelegramSendError(lastError)) {
+      break;
+    }
+
+    console.warn(`Telegram attachment send failed on attempt ${attempt + 1}/${retries + 1}; retrying in ${Math.round(retryDelayMs / 1000)}s.`);
+    await sleep(retryDelayMs);
   }
 
-  return { mode: 'attachment' };
+  throw new Error(lastError);
 }
 
 const MARKETPLACE_ID = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER';
 const TELEGRAM_TARGET = process.env.SEND_TO_AMAZON_TELEGRAM_TARGET || '8130524019';
 const TELEGRAM_CHANNEL = process.env.SEND_TO_AMAZON_CHANNEL || 'telegram';
+const AMAZON_API_HOST = process.env.AMAZON_SP_API_HOST || 'sellingpartnerapi-na.amazon.com';
+
+function positiveIntegerEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return fallback;
+  if (!/^\d+$/.test(raw)) throw new Error(`${name} must be a positive integer; received ${JSON.stringify(raw)}`);
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer; received ${JSON.stringify(raw)}`);
+  return value;
+}
+
+const NETWORK_PREFLIGHT_TIMEOUT_MS = positiveIntegerEnv('SEND_TO_AMAZON_NETWORK_PREFLIGHT_TIMEOUT_MS', 10000);
+const API_RESPONSE_TIMEOUT_MS = positiveIntegerEnv('SEND_TO_AMAZON_API_RESPONSE_TIMEOUT_MS', 15000);
+const API_IDLE_TIMEOUT_MS = positiveIntegerEnv('SEND_TO_AMAZON_API_IDLE_TIMEOUT_MS', 15000);
+const API_DEADLINE_TIMEOUT_MS = positiveIntegerEnv('SEND_TO_AMAZON_API_DEADLINE_TIMEOUT_MS', 60000);
+const TELEGRAM_SEND_TIMEOUT_MS = positiveIntegerEnv('SEND_TO_AMAZON_TELEGRAM_SEND_TIMEOUT_MS', 45000);
+
+function formatMiB(bytes) {
+  return `${(bytes / 1024 / 1024).toFixed(0)}MiB`;
+}
+
+function logMemory(stage) {
+  const memory = process.memoryUsage();
+  console.log(`[memory] ${stage}: rss=${formatMiB(memory.rss)} heapUsed=${formatMiB(memory.heapUsed)} heapTotal=${formatMiB(memory.heapTotal)}`);
+}
+
+function assertAmazonApiReachable() {
+  return new Promise((resolve, reject) => {
+    const request = https.request({
+      protocol: 'https:',
+      hostname: AMAZON_API_HOST,
+      method: 'HEAD',
+      path: '/',
+      timeout: NETWORK_PREFLIGHT_TIMEOUT_MS
+    }, (response) => {
+      response.resume();
+      // An unauthenticated response is expected. Any HTTP response proves
+      // DNS, TLS, and the route to Amazon are usable; service errors are
+      // handled by the bounded SP-API calls below.
+      console.log(`Amazon API preflight received HTTP ${response.statusCode}.`);
+      resolve();
+    });
+
+    request.once('timeout', () => request.destroy(new Error(`Amazon API preflight timed out after ${NETWORK_PREFLIGHT_TIMEOUT_MS}ms`)));
+    request.once('error', (error) => reject(new Error(`Amazon API preflight failed: ${error.code || error.message}`)));
+    request.end();
+  });
+}
 
 function num(x) {
   if (x == null) return 0;
@@ -130,18 +204,15 @@ function tsvParse(text) {
   return { header, rows };
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function isRetryableReportError(error) {
   const detail = `${error?.code || ''} ${error?.message || ''}`;
-  return /REPORT_PROCESSING_(?:FATAL|CANCELLED|CANCELLED_MANUALLY)|Something went wrong while processing the report|Report did not finish/i.test(detail);
+  return /REPORT_PROCESSING_(?:FATAL|CANCELLED|CANCELLED_MANUALLY)|Something went wrong while processing the report|Report did not finish|API_(?:RESPONSE|IDLE|DEADLINE)_TIMEOUT|ETIMEDOUT|ENOTFOUND|ECONNRESET|EAI_AGAIN/i.test(detail);
 }
 
-async function downloadReportWithRetry(sp, params, label, { retries = 2, delayMs = 30000 } = {}) {
+async function downloadReportWithRetry(sp, params, label, { retries = 1, delayMs = 15000 } = {}) {
   for (let attempt = 0; ; attempt++) {
     try {
+      logMemory(`${label} attempt ${attempt + 1} start`);
       return await sp.downloadReport(params);
     } catch (error) {
       if (attempt >= retries || !isRetryableReportError(error)) throw error;
@@ -154,6 +225,14 @@ async function downloadReportWithRetry(sp, params, label, { retries = 2, delayMs
 async function main() {
   const argv = process.argv.slice(2);
   const inventoryOnly = argv.includes('--refresh-inventory-only') || argv.includes('--inventory-only');
+  const preflightOnly = argv.includes('--preflight-only');
+
+  console.log(`Checking Amazon API reachability (${AMAZON_API_HOST})...`);
+  await assertAmazonApiReachable();
+  console.log('Amazon API preflight passed.');
+  if (preflightOnly) return;
+
+  logMemory('startup');
 
   const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://localhost/idgemz' });
   try {
@@ -171,7 +250,18 @@ async function main() {
     const sp = new SellingPartner({
       region: 'na',
       refresh_token: refreshToken,
-      options: { auto_request_throttled: true }
+      options: {
+        auto_request_throttled: true,
+        // The library retries transport failures by default. Keep retries in
+        // our bounded wrapper instead so an offline network cannot grow an
+        // unbounded request chain until Node exhausts the heap.
+        retry_remote_timeout: false,
+        timeouts: {
+          response: API_RESPONSE_TIMEOUT_MS,
+          idle: API_IDLE_TIMEOUT_MS,
+          deadline: API_DEADLINE_TIMEOUT_MS
+        }
+      }
     });
 
     try {
@@ -211,8 +301,16 @@ async function main() {
           marketplaceIds: [MARKETPLACE_ID]
         },
         interval: 15000,
-        cancel_after: 12,
-        download: { unzip: true, charset: 'utf8' }
+        cancel_after: 6,
+        download: {
+          unzip: true,
+          charset: 'utf8',
+          timeouts: {
+            response: API_RESPONSE_TIMEOUT_MS,
+            idle: API_IDLE_TIMEOUT_MS,
+            deadline: API_DEADLINE_TIMEOUT_MS
+          }
+        }
       }, 'Amazon MYI');
 
       const parsed = tsvParse(myiTsv);
@@ -293,6 +391,7 @@ async function main() {
 
       const uniqMissing = Array.from(new Set(missingSkus)).sort();
       console.log(`Inventory refresh complete (MYI): upserted ${upserts} rows (unmapped SKUs: ${misses}).`);
+      logMemory('after MYI refresh');
       if (misses) console.log(`Unmapped SKUs (sample): ${uniqMissing.slice(0, 50).join(', ')}`);
       if (inventoryOnly) {
         if (misses) {
@@ -313,8 +412,16 @@ async function main() {
         marketplaceIds: [MARKETPLACE_ID]
       },
       interval: 15000,
-      cancel_after: 12,
-      download: { unzip: true, charset: 'utf8' }
+      cancel_after: 6,
+      download: {
+        unzip: true,
+        charset: 'utf8',
+        timeouts: {
+          response: API_RESPONSE_TIMEOUT_MS,
+          idle: API_IDLE_TIMEOUT_MS,
+          deadline: API_DEADLINE_TIMEOUT_MS
+        }
+      }
     }, 'Amazon restock');
 
     const { header, rows } = tsvParse(tsv);
@@ -385,19 +492,21 @@ async function main() {
     fs.mkdirSync(attachmentDir, { recursive: true });
     const attachmentPath = path.join(attachmentDir, `send-to-amazon-${dateStr}.html`);
     fs.writeFileSync(attachmentPath, formatHtmlDocument(out, dateStr), 'utf8');
+    logMemory('report rendered');
 
     const caption = out.length
       ? `📦 Send to Amazon — ${dateStr}\n${out.length} SKU${out.length === 1 ? '' : 's'} matched the restock filter. HTML attachment is printable.`
       : `📦 Send to Amazon — ${dateStr}\nNo SKUs matched the restock filter today. HTML attachment included for printing/reference.`;
 
-    const sendResult = sendTelegramWithAttachment({
+    const sendResult = await sendTelegramWithAttachment({
       channel: TELEGRAM_CHANNEL,
       target: TELEGRAM_TARGET,
       caption,
       attachmentPath
-    });
+    }, { retries: 1, retryDelayMs: 15000 });
 
-    console.log(`Sent daily Send to Amazon Telegram ${sendResult.mode} to ${TELEGRAM_TARGET} (rows: ${out.length}, attachment: ${attachmentPath}).`);
+    const retryNote = sendResult.attempts > 1 ? ` after ${sendResult.attempts} attempts` : '';
+    console.log(`Sent daily Send to Amazon Telegram ${sendResult.mode}${retryNote} to ${TELEGRAM_TARGET} (rows: ${out.length}, attachment: ${attachmentPath}).`);
   } finally {
     await pool.end();
   }
